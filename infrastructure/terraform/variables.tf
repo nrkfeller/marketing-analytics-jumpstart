@@ -196,3 +196,9 @@ variable "feature_store_project_id" {
   type        = string
   description = "Project ID where feature store resources are created"
 }
+
+variable "deploy_monitor" {
+  description = "Toggler for monitor module"
+  type        = bool
+  default     = false
+}

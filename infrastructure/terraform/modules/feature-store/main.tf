@@ -51,6 +51,7 @@ module "project_services" {
     "storage.googleapis.com",
     "sourcerepo.googleapis.com",
     "storage-api.googleapis.com",
+    "ml.googleapis.com",
   ]
 }
 

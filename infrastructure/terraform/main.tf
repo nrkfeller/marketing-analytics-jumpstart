@@ -138,3 +138,12 @@ module "activation" {
   ga4_measurement_secret    = var.ga4_measurement_secret
   count                     = var.deploy_activation ? 1 : 0
 }
+
+module "monitor" {
+  source     = "./modules/monitor"
+  project_id = var.feature_store_project_id
+  location   = var.destination_data_location
+  enabled    = var.deploy_monitor
+  count      = var.deploy_monitor ? 1 : 0
+  depends_on = [module.feature_store]
+}

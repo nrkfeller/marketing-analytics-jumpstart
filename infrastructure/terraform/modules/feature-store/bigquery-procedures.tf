@@ -944,3 +944,215 @@ resource "google_bigquery_job" "job_invoke_audience_segmentation_training_prepar
 
   depends_on = [google_bigquery_routine.invoke_audience_segmentation_training_preparation]
 }
+
+resource "google_bigquery_dataset" "gemini_insights" {
+  dataset_id                  = "gemini_insights"
+  friendly_name               = "Gemini Insights"
+  description                 = "Dataset for Gemini AI model insights and predictions"
+  location                    = local.config_bigquery.dataset.feature_store.location
+  default_table_expiration_ms = 3600000
+  
+  labels = {
+    version = "pilot"
+  }
+}
+
+resource "google_bigquery_ml_model" "gemini_1_5_pro" {
+  dataset_id = google_bigquery_dataset.gemini_insights.dataset_id
+  model_id   = "gemini_1_5_pro"
+  
+  model_type = "REMOTE"
+  remote_service_type = "CLOUD_AI_LARGE_LANGUAGE_MODEL_V1"
+  
+  options {
+    remote_model_endpoint = "projects/${local.feature_store_project_id}/locations/${local.config_bigquery.dataset.feature_store.location}/publishers/google/models/gemini-1.5-pro"
+  }
+  
+  depends_on = [google_bigquery_dataset.gemini_insights]
+}
+
+data "local_file" "gemini_insights_analysis_file" {
+  filename = "${local.sql_dir}/procedure/gemini_insights_analysis.sql"
+}
+
+resource "google_bigquery_routine" "gemini_insights_analysis" {
+  dataset_id      = google_bigquery_dataset.gemini_insights.dataset_id
+  routine_id      = "gemini_insights_analysis"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
+  definition_body = data.local_file.gemini_insights_analysis_file.content
+  description     = "Procedure that uses Gemini 1.5 Pro model for advanced insights analysis"
+  
+  arguments {
+    name      = "analysis_date"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "DATE" })
+  }
+  arguments {
+    name      = "input_query"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "STRING" })
+  }
+  arguments {
+    name      = "insights_generated"
+    mode      = "OUT"
+    data_type = jsonencode({ "typeKind" : "INT64" })
+  }
+  
+  depends_on = [google_bigquery_ml_model.gemini_1_5_pro]
+}
+
+data "local_file" "gemini_customer_insights_file" {
+  filename = "${local.sql_dir}/procedure/gemini_customer_insights.sql"
+}
+
+resource "google_bigquery_routine" "gemini_customer_insights" {
+  dataset_id      = google_bigquery_dataset.gemini_insights.dataset_id
+  routine_id      = "gemini_customer_insights"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
+  definition_body = data.local_file.gemini_customer_insights_file.content
+  description     = "Procedure that generates customer insights using Gemini 1.5 Pro model"
+  
+  arguments {
+    name      = "analysis_date"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "DATE" })
+  }
+  arguments {
+    name      = "customer_segment"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "STRING" })
+  }
+  arguments {
+    name      = "insights_count"
+    mode      = "OUT"
+    data_type = jsonencode({ "typeKind" : "INT64" })
+  }
+  
+  depends_on = [google_bigquery_ml_model.gemini_1_5_pro]
+}
+
+data "local_file" "gemini_marketing_insights_file" {
+  filename = "${local.sql_dir}/procedure/gemini_marketing_insights.sql"
+}
+
+resource "google_bigquery_routine" "gemini_marketing_insights" {
+  dataset_id      = google_bigquery_dataset.gemini_insights.dataset_id
+  routine_id      = "gemini_marketing_insights"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
+  definition_body = data.local_file.gemini_marketing_insights_file.content
+  description     = "Procedure that generates marketing insights using Gemini 1.5 Pro model"
+  
+  arguments {
+    name      = "campaign_date"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "DATE" })
+  }
+  arguments {
+    name      = "campaign_type"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "STRING" })
+  }
+  arguments {
+    name      = "insights_generated"
+    mode      = "OUT"
+    data_type = jsonencode({ "typeKind" : "INT64" })
+  }
+  
+  depends_on = [google_bigquery_ml_model.gemini_1_5_pro]
+}
+
+data "local_file" "gemini_audience_analysis_file" {
+  filename = "${local.sql_dir}/procedure/gemini_audience_analysis.sql"
+}
+
+resource "google_bigquery_routine" "gemini_audience_analysis" {
+  dataset_id      = google_bigquery_dataset.gemini_insights.dataset_id
+  routine_id      = "gemini_audience_analysis"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
+  definition_body = data.local_file.gemini_audience_analysis_file.content
+  description     = "Procedure that performs audience analysis using Gemini 1.5 Pro model"
+  
+  arguments {
+    name      = "analysis_date"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "DATE" })
+  }
+  arguments {
+    name      = "audience_segment"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "STRING" })
+  }
+  arguments {
+    name      = "analysis_results"
+    mode      = "OUT"
+    data_type = jsonencode({ "typeKind" : "INT64" })
+  }
+  
+  depends_on = [google_bigquery_ml_model.gemini_1_5_pro]
+}
+
+data "local_file" "gemini_performance_analysis_file" {
+  filename = "${local.sql_dir}/procedure/gemini_performance_analysis.sql"
+}
+
+resource "google_bigquery_routine" "gemini_performance_analysis" {
+  dataset_id      = google_bigquery_dataset.gemini_insights.dataset_id
+  routine_id      = "gemini_performance_analysis"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
+  definition_body = data.local_file.gemini_performance_analysis_file.content
+  description     = "Procedure that analyzes performance metrics using Gemini 1.5 Pro model"
+  
+  arguments {
+    name      = "performance_date"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "DATE" })
+  }
+  arguments {
+    name      = "metric_type"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "STRING" })
+  }
+  arguments {
+    name      = "analysis_count"
+    mode      = "OUT"
+    data_type = jsonencode({ "typeKind" : "INT64" })
+  }
+  
+  depends_on = [google_bigquery_ml_model.gemini_1_5_pro]
+}
+
+data "local_file" "gemini_trend_analysis_file" {
+  filename = "${local.sql_dir}/procedure/gemini_trend_analysis.sql"
+}
+
+resource "google_bigquery_routine" "gemini_trend_analysis" {
+  dataset_id      = google_bigquery_dataset.gemini_insights.dataset_id
+  routine_id      = "gemini_trend_analysis"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
+  definition_body = data.local_file.gemini_trend_analysis_file.content
+  description     = "Procedure that performs trend analysis using Gemini 1.5 Pro model"
+  
+  arguments {
+    name      = "trend_date"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "DATE" })
+  }
+  arguments {
+    name      = "trend_category"
+    mode      = "INOUT"
+    data_type = jsonencode({ "typeKind" : "STRING" })
+  }
+  arguments {
+    name      = "trends_identified"
+    mode      = "OUT"
+    data_type = jsonencode({ "typeKind" : "INT64" })
+  }
+  
+  depends_on = [google_bigquery_ml_model.gemini_1_5_pro]
+}
