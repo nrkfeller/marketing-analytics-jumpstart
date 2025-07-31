@@ -11,3 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+output "tf_state_project_id" {
+  description = "Google Cloud project id to set on gcloud"
+  value       = var.tf_state_project_id
+}
+
+output "lookerstudio_create_dashboard_url" {
+  description = "URL for creating Looker Studio dashboard from template"
+  value       = var.deploy_monitoring ? module.monitoring[0].lookerstudio_create_dashboard_url : ""
+}

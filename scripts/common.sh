@@ -26,6 +26,63 @@ NC='\033[0m' # No Color
 DIVIDER=$(printf %"$(tput cols)"s | tr " " "*")
 DIVIDER+="\n"
 
+# DECLARE VARIABLES
+declare -a apis_array=("cloudresourcemanager.googleapis.com"
+                "serviceusage.googleapis.com"
+                "iam.googleapis.com"
+                "logging.googleapis.com"
+                "monitoring.googleapis.com"
+                "bigquery.googleapis.com"
+                "bigquerystorage.googleapis.com"
+                "dataform.googleapis.com"
+                "secretmanager.googleapis.com"
+                "cloudasset.googleapis.com"
+                "cloudfunctions.googleapis.com"
+                "storage.googleapis.com"
+                "datapipelines.googleapis.com"
+                "analyticsadmin.googleapis.com"
+                "workflows.googleapis.com"
+                "cloudscheduler.googleapis.com"
+                "bigquerymigration.googleapis.com"
+                "bigquerydatatransfer.googleapis.com"
+                "dataform.googleapis.com"
+                "cloudkms.googleapis.com"
+                "servicenetworking.googleapis.com"
+                "artifactregistry.googleapis.com"
+                "cloudbuild.googleapis.com"
+                "aiplatform.googleapis.com"
+                "storage-api.googleapis.com"
+                "bigqueryconnection.googleapis.com"
+                )
+
+create_bigquery_connection() {
+    _PROJECT_ID=$1
+    _LOCATION=$2
+    _CONNECTION_TYPE='CLOUD_RESOURCE'
+    _CONNECTION_NAME=$3
+
+    CONNECTION_EXISTS=$(bq ls --connection --location=$_LOCATION --project_id=$_PROJECT_ID)
+    if [ "$CONNECTION_EXISTS" = "No connections found." ]; then
+      bq mk --connection --location=$_LOCATION --project_id=$_PROJECT_ID --connection_type=$_CONNECTION_TYPE $_CONNECTION_NAME
+
+      SERVICE_ACCT_EMAIL=$(bq show --format=prettyjson --connection $_LOCATION.$_CONNECTION_NAME | grep "serviceAccountId" | cut -d '"' -f 4 | cut -d '?' -f 1)
+      echo $SERVICE_ACCT_EMAIL
+
+      gcloud projects add-iam-policy-binding $PROJECT_ID --condition=None --no-user-output-enabled --member="serviceAccount:$SERVICE_ACCT_EMAIL" --role="roles/serviceusage.serviceUsageConsumer"
+      gcloud projects add-iam-policy-binding $PROJECT_ID --condition=None --no-user-output-enabled --member="serviceAccount:$SERVICE_ACCT_EMAIL" --role="roles/bigquery.connectionUser"
+      gcloud projects add-iam-policy-binding $PROJECT_ID --condition=None --no-user-output-enabled --member="serviceAccount:$SERVICE_ACCT_EMAIL" --role="roles/bigquery.connectionAdmin"
+      gcloud projects add-iam-policy-binding $PROJECT_ID --condition=None --no-user-output-enabled --member="serviceAccount:$SERVICE_ACCT_EMAIL" --role="roles/aiplatform.user"
+      gcloud projects add-iam-policy-binding $PROJECT_ID --condition=None --no-user-output-enabled --member="serviceAccount:$SERVICE_ACCT_EMAIL" --role="roles/bigquery.jobUser"
+      gcloud projects add-iam-policy-binding $PROJECT_ID --condition=None --no-user-output-enabled --member="serviceAccount:$SERVICE_ACCT_EMAIL" --role="roles/bigquery.dataEditor"
+      gcloud projects add-iam-policy-binding $PROJECT_ID --condition=None --no-user-output-enabled --member="serviceAccount:$SERVICE_ACCT_EMAIL" --role="roles/storage.admin"
+      gcloud projects add-iam-policy-binding $PROJECT_ID --condition=None --no-user-output-enabled --member="serviceAccount:$SERVICE_ACCT_EMAIL" --role="roles/storage.objectViewer"
+      return 0
+    else
+      echo "BQ Connection already exists: $CONNECTION_EXISTS"
+      return 0
+    fi
+}
+
 get_project_id() {
     local __resultvar=$1
     VALUE=$(gcloud config get-value project | xargs)
@@ -101,6 +158,49 @@ set_environment_variable_if_not_set() {
   unset _VARIABLE_VALUE
 }
 
+set_environment_variable_from_input_or_default_if_not_set() {
+  _VARIABLE_NAME=$1
+  _VALUE_TO_SET=$2
+  _VALUE_DESC=$3
+  _ENTITY_DESC=$4
+  _VARIABLE_VALUE="${!_VARIABLE_NAME:-}"
+  if [ -z "${_VARIABLE_VALUE}" ]; then
+    echo Input ${_VALUE_DESC} for ${_ENTITY_DESC} or press Enter to use the default ${_VALUE_DESC}: ${_VALUE_TO_SET}
+    read _INPUT
+    if [[ ${_INPUT} == "" ]]; then
+      export "${_VARIABLE_NAME}"="${_VALUE_TO_SET}"
+    else
+      export "${_VARIABLE_NAME}"="${_INPUT}"
+    fi
+  fi
+  unset _VARIABLE_NAME
+  unset _VALUE_TO_SET
+  unset _VARIABLE_VALUE
+  unset _VALUE_DESC
+  unset _ENTITY_DESC
+  unset _INPUT
+}
+
+set_environment_variable_from_input_if_not_set() {
+  _VARIABLE_NAME=$1
+  _VALUE_DESC=$2
+  _ENTITY_DESC=$3
+  _VARIABLE_VALUE="${!_VARIABLE_NAME:-}"
+  if [ -z "${_VARIABLE_VALUE}" ]; then
+    echo Input ${_VALUE_DESC} for ${_ENTITY_DESC}:
+    _INPUT=
+    while [[ ${_INPUT} = "" ]]; do
+      read _INPUT
+    done
+    export "${_VARIABLE_NAME}"="${_INPUT}"
+  fi
+  unset _VARIABLE_NAME
+  unset _VARIABLE_VALUE
+  unset _VALUE_DESC
+  unset _ENTITY_DESC
+  unset _INPUT
+}
+
 run_terraform() {
   _TERRAFORM_RUN_DIR=$1
   terraform -chdir="${_TERRAFORM_RUN_DIR}" version
@@ -144,4 +244,58 @@ EOF
   unset _TERRAFORM_RUN_DIR
   unset _TF_STATE_BUCKET
   unset _TERRAFORM_BACKEND_CONFIGURATION_FILE_PATH
+}
+
+set_application_default_credentials() {
+  _SOURCE_ROOT=$1
+  _CREDENTIAL_FILE_DIR="${_SOURCE_ROOT}/.credentials"
+  _CREDENTIAL_FILE_PATH="${_CREDENTIAL_FILE_DIR}/application_default_credentials.json"
+  if [ ! -f "${_CREDENTIAL_FILE_PATH}" ]; then
+    _AUTH_OUTPUT=$( gcloud auth application-default login --quiet --scopes="openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/analytics,https://www.googleapis.com/auth/analytics.edit,https://www.googleapis.com/auth/analytics.provision,https://www.googleapis.com/auth/analytics.readonly,https://www.googleapis.com/auth/accounts.reauth" 2>&1 | tee /dev/tty )
+    _CRED_PATH=$( echo ${_AUTH_OUTPUT} | cut -d "[" -f2 | cut -d "]" -f1 )
+    mkdir -p "${_CREDENTIAL_FILE_DIR}" && cp "${_CRED_PATH}" "${_CREDENTIAL_FILE_PATH}"
+    unset _CRED_PATH
+    unset _AUTH_OUTPUT
+  fi
+  export GOOGLE_APPLICATION_CREDENTIALS="${_CREDENTIAL_FILE_PATH}"
+  unset _CREDENTIAL_FILE_PATH
+  unset _CREDENTIAL_FILE_DIR
+  unset _SOURCE_ROOT
+}
+
+# shell script function to check if api is enabled
+check_apis_enabled(){
+    local __api_endpoint=$1
+    COUNTER=0
+    MAX_TRIES=100
+    while ! gcloud services list --project=$PROJECT_ID | grep -i $__api_endpoint && [ $COUNTER -lt $MAX_TRIES ]
+    do
+        sleep 6
+        printf "."
+        COUNTER=$((COUNTER + 1))
+    done
+    if [ $COUNTER -eq $MAX_TRIES ]; then
+        echo "${__api_endpoint} api is not enabled, installation can not continue!"
+        exit 1
+    else
+        echo "${__api_endpoint} api is enabled"
+    fi
+    unset __api_endpoint
+}
+
+# shell script function to enable api
+enable_apis(){
+    local __api_endpoint=$1
+    gcloud services enable $__api_endpoint
+    check_apis_enabled $__api_endpoint
+    unset __api_endpoint
+}
+
+# enable all apis in the array
+enable_all_apis () {
+    ## now loop through the above array
+    for i in "${apis_array[@]}"
+    do
+        enable_apis "$i"
+    done
 }

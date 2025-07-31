@@ -1,0 +1,69 @@
+  -- Copyright 2023 Google LLC
+  --
+  -- Licensed under the Apache License, Version 2.0 (the "License");
+  -- you may not use this file except in compliance with the License.
+  -- You may obtain a copy of the License at
+  --
+  --     http://www.apache.org/licenses/LICENSE-2.0
+  --
+  -- Unless required by applicable law or agreed to in writing, software
+  -- distributed under the License is distributed on an "AS IS" BASIS,
+  -- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  -- See the License for the specific language governing permissions and
+  -- limitations under the License.
+
+-- The procedure audience_segmentation_training_preparation prepares data for training the Audience Segmentation model.
+DECLARE custom_start_date DATE DEFAULT NULL;
+DECLARE custom_end_date DATE DEFAULT NULL;
+
+-- custom_start_date: The start date of the data to be used for training.
+-- custom_end_date: The end date of the data to be used for training.
+SET custom_start_date = PARSE_DATE("%Y-%m-%d", {{custom_start_date}});
+SET custom_end_date = PARSE_DATE("%Y-%m-%d", {{custom_end_date}});
+
+-- The procedure first checks if the custom_start_date and custom_end_date parameters are valid. 
+-- If either parameter is not valid, the procedure sets the corresponding date to the maximum or
+-- minimum date of the available data.
+IF (custom_start_date IS NOT NULL OR custom_start_date >= DATE_START OR custom_start_date <= DATE_END) 
+   AND custom_start_date < DATE_END THEN
+  SET DATE_START = custom_start_date;
+END IF;
+
+IF (custom_end_date IS NOT NULL OR custom_end_date <= DATE_END OR custom_end_date >= DATE_START) 
+   AND custom_end_date > DATE_START THEN
+  SET DATE_END = custom_end_date;
+END IF;
+
+-- Invoke stored procedure that perform feature engineering, creating new features from existing data to improve the model's performance. 
+-- This involve calculating rolling averages, creating time-based features, and transforming categorical variables.
+-- Aggregate data for each user, summarizing their behavior over the specified LOOKBACK_DAYS period.
+-- Filters the extracted data based on the provided DATE_START and DATE_END parameters, ensuring you're only working with data within the desired time range.
+CALL `{{project_id}}.{{dataset}}.auto_audience_segmentation_dataset_preparation`(DATE_START, DATE_END, LOOKBACK_DAYS);
+
+-- Create a new table named auto_audience_segmentation_training_15 by selecting all data from the auto_audience_segmentation_full_dataset table.
+CREATE OR REPLACE TABLE `{{project_id}}.{{dataset}}.auto_audience_segmentation_training_15`
+AS
+SELECT
+  DISTINCT *
+FROM
+  `{{project_id}}.{{dataset}}.auto_audience_segmentation_full_dataset`
+WHERE
+  -- Filters the data to include only records within the specified date range.
+  feature_timestamp >= TIMESTAMP(DATE_START)
+  AND feature_timestamp <= TIMESTAMP(DATE_END)
+-- Limit the number of row examples in the training set.
+LIMIT {{total_samples}};
+
+-- Create a new view named v_auto_audience_segmentation_training_15 by selecting distinct data from the auto_audience_segmentation_training_15 table.
+CREATE OR REPLACE VIEW `{{project_id}}.{{dataset}}.v_auto_audience_segmentation_training_15`
+  OPTIONS(
+    friendly_name="v_auto_audience_segmentation_inference_15",
+    description="View Auto Audience Segmentation dataset using 15 days lookback.",
+    labels=[("org_unit", "development")]
+  )
+AS
+SELECT 
+  DISTINCT * 
+FROM `{{project_id}}.{{dataset}}.auto_audience_segmentation_training_15`
+-- Limit the number of row examples in the training set.
+LIMIT {{total_samples}};

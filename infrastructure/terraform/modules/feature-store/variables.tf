@@ -25,10 +25,20 @@ variable "enabled" {
 variable "region" {
   description = "feature store region"
   type        = string
-  default     = "us-central1"
 }
 
 variable "project_id" {
   type        = string
   description = "Google Cloud Project ID"
+}
+
+variable "sql_dir_input" {
+  type        = string
+  description = "SQL queries directory"
+}
+
+variable "uv_run_alias" {
+  description = "alias for uv run command on the current system"
+  type        = string
+  default     = "uv run"
 }

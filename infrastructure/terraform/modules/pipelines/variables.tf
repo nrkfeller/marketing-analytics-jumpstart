@@ -17,7 +17,12 @@ variable "config_file_path" {
   description = "pipelines config file"
 }
 
-variable "poetry_run_alias" {
-  description = "alias for poetry run command on the current system"
+variable "uv_run_alias" {
+  description = "alias for uv run command on the current system"
+  type        = string
+}
+
+variable "mds_project_id" {
+  description = "Google Cloud Project ID for MDS"
   type        = string
 }

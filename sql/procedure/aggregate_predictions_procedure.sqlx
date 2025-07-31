@@ -1,0 +1,491 @@
+-- Copyright 2023 Google LLC
+  --
+  -- Licensed under the Apache License, Version 2.0 (the "License");
+  -- you may not use this file except in compliance with the License.
+  -- You may obtain a copy of the License at
+  --
+  --     http://www.apache.org/licenses/LICENSE-2.0
+  --
+  -- Unless required by applicable law or agreed to in writing, software
+  -- distributed under the License is distributed on an "AS IS" BASIS,
+  -- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  -- See the License for the specific language governing permissions and
+  -- limitations under the License.
+  -- Setting procedure to lookback from the day before `inference_date`
+
+-- This procedure aggregates predictions from multiple BigQuery tables into a single table.
+-- It can be breakdown in 6 steps:
+-- 1. Declare Variables: The code declares several variables that will be used throughout the procedure.
+-- 2. Define Helper Functions: The code defines several helper functions that will be used in the procedure
+-- 3. Set Variable Values: The code sets the values of the declared variables using the helper functions and other expressions.
+-- 4. Create Temporary Tables: The code creates several temporary tables that will be used to store intermediate results.
+-- 5. Execute Queries: The code executes several SQL queries to aggregate the predictions from the different BigQuery tables.
+-- 6. Create Final Table: The code creates a final BigQuery table that contains the aggregated predictions.
+
+-- Declaring Variables: The code starts by declaring a bunch of variables that will hold information about the tables, datasets, and specific columns involved in the aggregation process.
+DECLARE
+  project_id,
+  table_pattern, #  A pattern used to identify the BigQuery tables that contain the predictions.
+  clv_table_pattern, # A pattern used to identify the BigQuery table that contains the customer lifetime value (CLV) predictions.
+  clv_dataset, # The dataset ID of the dataset that contains the CLV predictions table.
+  purchase_propensity_dataset, # The dataset ID of the dataset that contains the purchase propensity predictions table.
+  audience_segmentation_dataset, # The dataset ID of the dataset that contains the audience segmentation predictions table.
+  auto_audience_segmentation_dataset, # The dataset ID of the dataset that contains the auto audience segmentation predictions table.
+  churn_propensity_dataset, # The dataset ID of the dataset that contains the churn propensity predictions table.
+  clv_table,
+  purchase_propensity_table,
+  audience_segmentation_table,
+  auto_audience_segmentation_table,
+  churn_propensity_table,
+  first_join_common_selections,
+  first_query_str,
+  clv_selections,
+  purchase_selections,
+  churn_propensity_selections,
+  first_join_selections,
+  second_join_common_selections,
+  audience_segmentation_selections,
+  second_query_str,
+  third_join_common_selections,
+  second_join_selections,
+  auto_audience_segmentation_selections,
+  third_query_str,
+  fourth_join_common_selections,
+  third_join_selections,
+  fourth_query_str STRING;
+DECLARE
+  clv_columns,
+  clv_special_columns,
+  purchase_propensity_columns,
+  purchase_propensity_special_columns,
+  audience_segmentation_columns,
+  audience_segmentation_special_columns,
+  auto_audience_segmentation_columns,
+  first_join_common_columns,
+  clv_select_columns,
+  purchase_propensity_select_columns,
+  first_join_columns,
+  second_join_common_columns,
+  first_join_select_columns,
+  audience_segmentation_select_columns,
+  second_join_columns,
+  auto_audience_segmentation_select_columns,
+  auto_audience_segmentation_special_columns,
+  third_join_common_columns,
+  second_join_select_columns,
+  churn_propensity_columns,
+  churn_propensity_select_columns,
+  churn_propensity_special_columns,
+  third_join_columns,
+  third_join_select_columns,
+  fourth_join_common_columns ARRAY<STRING>;
+SET
+  project_id = '{{project_id}}';
+
+-- Defining Helper Functions: Several helper functions are defined to make the code more readable and reusable
+-- A procedure that retrieves the column names for a specified BigQuery table.
+CREATE OR REPLACE PROCEDURE
+  {{dataset_id}}.get_columns_for_table(table_name STRING,
+    data_set STRING,
+    OUT table_columns ARRAY<STRING>)
+BEGIN
+DECLARE
+  table_name_only STRING;
+SET
+  table_name_only = ( REGEXP_EXTRACT(table_name, r'.*\.(.*)') );
+EXECUTE IMMEDIATE
+  FORMAT("""
+SELECT ARRAY_AGG(column_name)
+  FROM `%s.`.INFORMATION_SCHEMA.COLUMNS
+  WHERE table_name = '%s'
+""", data_set, table_name_only) INTO table_columns;
+END
+  ;
+-- A procedure that retrieves the name of the latest BigQuery table that matches a specified pattern.
+CREATE OR REPLACE PROCEDURE
+  {{dataset_id}}.get_latest_table_by_pattern(dataset_name STRING,
+    table_pattern STRING,
+    OUT table_name STRING)
+BEGIN
+EXECUTE IMMEDIATE
+  FORMAT("""
+CREATE OR REPLACE TEMPORARY TABLE temp_table  AS
+SELECT
+    CONCAT(dataset_id,'.',table_id) AS full_table_name
+  FROM
+    `%s.__TABLES__`
+  WHERE
+    table_id LIKE '%s'
+  AND
+    NOT CONTAINS_SUBSTR(table_id, 'error')
+  ORDER BY
+    last_modified_time DESC
+  LIMIT
+    1;
+    """, dataset_name, table_pattern);
+SET
+  table_name = (
+  SELECT
+    full_table_name
+  FROM
+    temp_table );
+END
+  ;
+--  A function that returns the difference between two arrays.
+CREATE TEMP FUNCTION
+  array_diff(src_array ARRAY<STRING>,
+    rm_array ARRAY<STRING>)
+  RETURNS ARRAY<STRING> AS ((
+    SELECT
+      ARRAY(
+      SELECT
+        DISTINCT element
+      FROM
+        UNNEST(src_array) AS element EXCEPT DISTINCT
+      SELECT
+        element
+      FROM
+        UNNEST(rm_array) AS element ) ));
+-- A function that returns the common elements between two arrays.
+CREATE TEMP FUNCTION
+  array_common(arr_one ARRAY<STRING>,
+    arr_two ARRAY<STRING>) AS ((
+    SELECT
+      ARRAY(
+      SELECT
+        element
+      FROM
+        UNNEST(arr_one) AS element
+      WHERE
+        element IN UNNEST(arr_two) ) ));
+-- A function that creates a SQL expression for selecting common columns from two tables.
+CREATE TEMP FUNCTION
+  create_common_columns_select(common_columns ARRAY<STRING>,
+    f_alias STRING,
+    s_alias STRING)
+  RETURNS STRING AS ((
+    SELECT
+      ARRAY_TO_STRING((
+        SELECT
+          ARRAY(
+          SELECT
+            CONCAT('COALESCE(',f_alias, '.', element, ',', s_alias,'.', element,') AS ', element)
+          FROM
+            UNNEST(common_columns) AS element) ), ',') ));
+-- A function that creates a SQL expression for selecting columns from a single table.
+CREATE TEMP FUNCTION
+  create_columns_select(COLUMNS ARRAY<STRING>,
+    t_alias STRING)
+  RETURNS STRING AS ((
+    SELECT
+      ARRAY_TO_STRING((
+        SELECT
+          ARRAY(
+          SELECT
+            CONCAT(t_alias, '.', element)
+          FROM
+            UNNEST(COLUMNS) AS element) ), ',') ));
+
+-- Gathering Information
+-- Setting Table Patterns: The code defines patterns to identify the BigQuery tables containing predictions for different use cases 
+-- (CLTV, purchase propensity, churn propensity, audience segmentation, and auto audience segmentation).
+-- Getting Dataset IDs: It constructs the dataset IDs for each use case by combining the project ID with the specified dataset names.
+-- Finding Latest Tables: The get_latest_table_by_pattern procedure is called to retrieve the names of the latest prediction tables for each use case.
+-- Retrieving Columns: The get_columns_for_table procedure is called to get the list of columns for each prediction table.
+
+-- Setting all predictions tables naming patterns
+SET
+  table_pattern = 'predictions_%_view';
+SET
+  clv_table_pattern = 'predictions_%_view_final';
+SET
+  clv_dataset = CONCAT(project_id, '.{{customer_lifetime_value_dataset}}');
+SET
+  purchase_propensity_dataset = CONCAT(project_id, '.{{purchase_propensity_dataset}}');
+SET
+  churn_propensity_dataset = CONCAT(project_id, '.{{churn_propensity_dataset}}');
+SET
+  audience_segmentation_dataset = CONCAT(project_id, '.{{audience_segmentation_dataset}}');
+SET
+  auto_audience_segmentation_dataset = CONCAT(project_id, '.{{auto_audience_segmentation_dataset}}');
+
+-- Getting latest prediction table name
+CALL
+  {{dataset_id}}.get_latest_table_by_pattern(clv_dataset,
+    clv_table_pattern,
+    clv_table);
+CALL
+  {{dataset_id}}.get_latest_table_by_pattern(purchase_propensity_dataset,
+    table_pattern,
+    purchase_propensity_table);
+CALL
+  {{dataset_id}}.get_latest_table_by_pattern(churn_propensity_dataset,
+    table_pattern,
+    churn_propensity_table);
+CALL
+  {{dataset_id}}.get_latest_table_by_pattern(audience_segmentation_dataset,
+    'pred_%_view',
+    audience_segmentation_table);
+CALL
+  {{dataset_id}}.get_latest_table_by_pattern(auto_audience_segmentation_dataset,
+    'pred_%_view',
+    auto_audience_segmentation_table);
+
+-- Getting predictions tables columns for each use case
+CALL
+  {{dataset_id}}.get_columns_for_table(clv_table,
+    clv_dataset,
+    clv_columns);
+CALL
+  {{dataset_id}}.get_columns_for_table(purchase_propensity_table,
+    purchase_propensity_dataset,
+    purchase_propensity_columns);
+CALL
+  {{dataset_id}}.get_columns_for_table(churn_propensity_table,
+    churn_propensity_dataset,
+    churn_propensity_columns);
+CALL
+  {{dataset_id}}.get_columns_for_table(audience_segmentation_table,
+    audience_segmentation_dataset,
+    audience_segmentation_columns);
+CALL
+  {{dataset_id}}.get_columns_for_table(auto_audience_segmentation_table,
+    auto_audience_segmentation_dataset,
+    auto_audience_segmentation_columns);
+
+-- Preparing for Joins
+-- Identifying Special Columns: The code defines arrays of special columns for each prediction table, which are typically related to prediction results, timestamps, and user IDs.
+-- Selecting Relevant Columns: The code uses the array_diff and array_common functions to carefully select the columns that will be used in the joins.
+-- Creating SQL Expressions: The create_common_columns_select and create_columns_select functions are used to generate SQL expressions for selecting columns from different tables.
+
+-- Setting special column identifiers for each use case predicition table
+SET
+  clv_special_columns = ['prediction',
+  'processed_timestamp',
+  'feature_date',
+  'user_pseudo_id'];
+SET
+  purchase_propensity_special_columns = ['prediction',
+  'prediction_prob',
+  'processed_timestamp',
+  'feature_date',
+  'user_pseudo_id'];
+SET
+  churn_propensity_special_columns = ['prediction',
+  'prediction_prob',
+  'processed_timestamp',
+  'feature_date',
+  'user_pseudo_id'];
+SET
+  audience_segmentation_special_columns = ['NEAREST_CENTROIDS_DISTANCE',
+  'prediction',
+  'processed_timestamp',
+  'feature_date',
+  'user_pseudo_id'];
+SET
+  auto_audience_segmentation_special_columns = ['NEAREST_CENTROIDS_DISTANCE',
+  'user_pseudo_id',
+  'feature_timestamp',
+  'prediction'];
+
+
+-- Logic for FIRST JOIN between CLTV and purchase propensity predictions
+SET
+  clv_select_columns = array_diff(clv_columns,
+    clv_special_columns);
+SET
+  first_join_common_columns = array_common(clv_select_columns,
+    purchase_propensity_columns);
+SET
+  clv_select_columns = array_diff(clv_select_columns,
+    first_join_common_columns);
+SET
+  purchase_propensity_select_columns = array_diff(purchase_propensity_columns,
+    purchase_propensity_special_columns);
+SET
+  purchase_propensity_select_columns = array_diff(purchase_propensity_select_columns,
+    first_join_common_columns);
+SET
+  first_join_common_selections = create_common_columns_select(first_join_common_columns,
+    'a',
+    'b');
+SET
+  clv_selections = create_columns_select(clv_select_columns,
+    'a');
+SET
+  purchase_selections = create_columns_select(purchase_propensity_select_columns,
+    'b');
+
+-- First Join: The code joins the CLTV and purchase propensity predictions tables based on the user_pseudo_id column. It creates a temporary table (temp1) to store the results.
+-- The list of columns specified to create the temporary table must be the same for the next join columns (i.e. first_join_columns)
+SET
+  first_query_str = FORMAT("""
+CREATE TEMPORARY TABLE temp1 AS
+SELECT
+a.prediction AS ltv,
+a.user_pseudo_id,
+a.processed_timestamp AS ltv_processed_timestamp,
+a.feature_date AS ltv_feature_date,
+NTILE(10) OVER (ORDER BY a.prediction DESC) AS ltv_decile,
+b.prediction AS likely_to_purchase,
+b.prediction_prob AS purchase_score,
+b.processed_timestamp AS purchase_processed_timestamp,
+b.feature_date AS purchase_feature_date,
+NTILE(10) OVER (ORDER BY b.prediction_prob DESC) AS p_p_decile,
+%s,
+%s,
+%s
+FROM
+  `%s` AS a
+full outer join `%s` AS b
+on a.user_pseudo_id=b.user_pseudo_id;
+""", first_join_common_selections, clv_selections, purchase_selections, clv_table, purchase_propensity_table);
+EXECUTE IMMEDIATE
+  first_query_str;
+
+-- Logic for SECOND JOIN LTV, purchase propensity and audience segmentation predictions
+-- The list of columns specified must match the list of columns listed above.
+SET
+  first_join_columns = ARRAY_CONCAT(['ltv', 'user_pseudo_id', 'ltv_processed_timestamp', 'ltv_feature_date', 'ltv_decile', 'likely_to_purchase', 'purchase_score', 'purchase_processed_timestamp', 'purchase_feature_date', 'p_p_decile'], first_join_common_columns, clv_select_columns, purchase_propensity_select_columns);
+SET
+  audience_segmentation_select_columns = array_diff(audience_segmentation_columns,
+    audience_segmentation_special_columns);
+SET
+  second_join_common_columns = array_common(first_join_columns,
+    audience_segmentation_select_columns);
+SET
+  first_join_select_columns = array_diff(first_join_columns,
+    second_join_common_columns);
+SET
+  audience_segmentation_select_columns = array_diff(audience_segmentation_select_columns,
+    second_join_common_columns);
+SET
+  second_join_common_selections = create_common_columns_select(second_join_common_columns,
+    'c',
+    'd');
+SET
+  first_join_selections = create_columns_select(first_join_select_columns,
+    'c');
+SET
+  audience_segmentation_selections = create_columns_select(audience_segmentation_select_columns,
+    'd');
+
+-- Second Join: The code joins the results from the first join with the audience segmentation predictions table, again based on user_pseudo_id. It creates another temporary table (temp2).
+-- The list of columns specified to create the temporary table must be the same for the next join columns (i.e. second_join_columns)
+SET
+  second_query_str = FORMAT("""
+CREATE OR REPLACE TEMPORARY TABLE temp2 AS
+SELECT
+%s,
+%s,
+d.NEAREST_CENTROIDS_DISTANCE[OFFSET(0)].CENTROID_ID AS Segment_ID,
+d.NEAREST_CENTROIDS_DISTANCE[OFFSET(0)].DISTANCE AS Segment_Distance,
+d.processed_timestamp as segment_processed_timestamp,
+d.feature_date as segment_feature_date,
+%s
+FROM
+  temp1 AS c
+full outer join `%s` AS d
+on c.user_pseudo_id=d.user_pseudo_id;
+""", first_join_selections, second_join_common_selections, audience_segmentation_selections, audience_segmentation_table);
+EXECUTE IMMEDIATE
+  second_query_str;
+
+
+-- Logic for THIRD JOIN between LTV, purchase propensity, audience segmentation and churn propensity predictions
+-- The list of columns specified must match the list of columns listed above.
+SET
+  second_join_columns = ARRAY_CONCAT(first_join_select_columns, second_join_common_columns,['Segment_ID', 'Segment_Distance', 'segment_processed_timestamp', 'segment_feature_date'], audience_segmentation_select_columns);
+SET
+  churn_propensity_select_columns = array_diff(churn_propensity_columns,
+    churn_propensity_special_columns);
+SET
+  third_join_common_columns = array_common(second_join_columns,
+    churn_propensity_select_columns);
+SET
+  second_join_select_columns = array_diff(second_join_columns,
+    third_join_common_columns);
+SET
+  churn_propensity_select_columns = array_diff(churn_propensity_select_columns,
+    third_join_common_columns);
+SET
+  third_join_common_selections = create_common_columns_select(third_join_common_columns,
+    'e',
+    'f');
+SET
+  second_join_selections = create_columns_select(second_join_select_columns,
+    'e');
+SET
+  churn_propensity_selections = create_columns_select(churn_propensity_select_columns,
+    'f');
+
+-- Third Join: The code joins the results from the second join with the churn propensity predictions table, again based on user_pseudo_id. It creates a temporary table (temp3).
+-- The list of columns specified to create the temporary table must be the same for the next join columns (i.e. third_join_columns)
+SET
+  third_query_str = FORMAT("""
+CREATE OR REPLACE TEMPORARY TABLE temp3 AS
+SELECT
+%s,
+%s,
+f.prediction AS likely_to_churn,
+f.prediction_prob AS churn_score,
+f.processed_timestamp AS churn_processed_timestamp,
+f.feature_date AS churn_feature_date,
+NTILE(10) OVER (ORDER BY f.prediction_prob DESC) AS c_p_decile,
+%s
+FROM
+  temp2 AS e
+full outer join `%s` AS f
+on e.user_pseudo_id=f.user_pseudo_id;
+""", second_join_selections, third_join_common_selections, churn_propensity_selections, churn_propensity_table);
+EXECUTE IMMEDIATE
+  third_query_str;
+
+
+-- Logic for FOURTH join between LTV, purchase propensity, churn propensity, audience segmentation, and auto audience segmentation predictions
+-- The list of columns specified must match the list of columns listed above.
+SET
+  third_join_columns = ARRAY_CONCAT(second_join_select_columns, third_join_common_columns, ['likely_to_churn', 'churn_score', 'churn_processed_timestamp', 'churn_feature_date', 'c_p_decile'], churn_propensity_select_columns);
+SET
+  auto_audience_segmentation_select_columns = array_diff(auto_audience_segmentation_columns,
+    auto_audience_segmentation_special_columns);
+SET
+  fourth_join_common_columns = array_common(third_join_columns,
+    auto_audience_segmentation_select_columns);
+SET
+  third_join_select_columns = array_diff(third_join_columns,
+    fourth_join_common_columns);
+SET
+  auto_audience_segmentation_select_columns = array_diff(auto_audience_segmentation_select_columns,
+    fourth_join_common_columns);
+SET
+  fourth_join_common_selections = create_common_columns_select(fourth_join_common_columns,
+    'g',
+    'h');
+SET
+  third_join_selections = create_columns_select(third_join_select_columns,
+    'g');
+SET
+  auto_audience_segmentation_selections = create_columns_select(auto_audience_segmentation_select_columns,
+    'h');
+
+-- Fourth Join: The code joins the results from the third join with the auto audience segmentation predictions table, again based on user_pseudo_id. This final join creates the final table with all the aggregated predictions.
+-- This SQL block combines all the predictions from different tables into a single, comprehensive table, ready for further analysis or use in downstream applications.
+SET
+  fourth_query_str = FORMAT("""
+CREATE OR REPLACE TABLE `%s.{{dataset_id}}.{{table_id}}` AS
+SELECT
+%s,
+%s,
+h.feature_timestamp AS auto_segment_processed_timestamp,
+h.NEAREST_CENTROIDS_DISTANCE[OFFSET(0)].CENTROID_ID AS Auto_Segment_ID,
+h.NEAREST_CENTROIDS_DISTANCE[OFFSET(0)].DISTANCE AS Auto_Segment_Distance,
+%s
+FROM temp3 AS g
+full outer join `%s` AS h
+ON g.user_pseudo_id=h.user_pseudo_id;
+""", project_id, third_join_selections, fourth_join_common_selections, auto_audience_segmentation_selections, auto_audience_segmentation_table);
+
+-- Executing the Query: The EXECUTE IMMEDIATE statement executes the final query, creating the final table with all the aggregated predictions.
+EXECUTE IMMEDIATE
+  fourth_query_str;

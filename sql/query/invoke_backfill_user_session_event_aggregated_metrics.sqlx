@@ -12,26 +12,432 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
-DECLARE input_date DATE;
-DECLARE end_date DATE;
-DECLARE users_added INT64 DEFAULT NULL;
-
 DECLARE max_date DATE;
 DECLARE min_date DATE;
 SET max_date = (SELECT DATE_SUB(MAX(event_date), INTERVAL {{interval_max_date}} DAY) FROM `{{mds_project_id}}.{{mds_dataset}}.event`); 
 SET min_date = (SELECT DATE_ADD(MIN(event_date), INTERVAL {{interval_min_date}} DAY) FROM `{{mds_project_id}}.{{mds_dataset}}.event`); 
-SELECT max_date;
-SELECT min_date;
 
-FOR record IN
-  (SELECT DISTINCT 
-      event_date
-   FROM `{{mds_project_id}}.{{mds_dataset}}.event`
-   WHERE event_date BETWEEN min_date AND max_date
-      ORDER BY event_date ASC )
-DO
-  SET input_date= (SELECT record.event_date);
-  SET end_date= (SELECT DATE_SUB(record.event_date, INTERVAL {{interval_end_date}} DAY));
-  CALL `{{project_id}}.{{dataset}}.{{stored_procedure}}`(input_date, end_date, users_added);
-  SELECT users_added;
-END FOR;
+-- If min_date > maximum event_date OR max_date < minimum event_date, then set min_date for the max event_date and set max_date for the min event_date
+IF min_date >= (SELECT MAX(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`) OR max_date <= (SELECT MIN(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`) OR min_date >= max_date THEN
+  SET min_date = (SELECT MIN(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`);
+  SET max_date = (SELECT MAX(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`);
+END IF;
+
+-- This code block acts as a safeguard to ensure that the min_date and max_date used for further analysis are always within the bounds of the actual data available in the table. 
+-- It prevents situations where calculations might mistakenly consider dates beyond the real data range, which could lead to errors or misleading results.
+IF max_date > (SELECT MAX(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`) OR min_date < (SELECT MIN(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`) THEN
+  SET min_date = (SELECT MIN(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`);
+  SET max_date = (SELECT MAX(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`);
+END IF;
+
+-- This block creates a temporary table named dates_interval. This table will store a range of dates based on the calculated min_date and max_date.
+CREATE OR REPLACE TEMP TABLE dates_interval as (
+  SELECT DISTINCT 
+    event_date as input_date,
+    DATE_SUB(event_date, INTERVAL {{interval_end_date}} DAY) as end_date
+  FROM `{{mds_project_id}}.{{mds_dataset}}.event`
+  WHERE event_date BETWEEN min_date AND max_date
+    ORDER BY input_date DESC
+);
+
+-- What is the user-per-day session-scoped engagement?
+CREATE OR REPLACE TEMP TABLE engagement_per_day_session_scoped as (
+  SELECT
+    user_pseudo_id,
+    feature_date,
+    -- This line calculates the engagement_rate by dividing the count of distinct engaged sessions (where session_engaged is true) by the count of all distinct sessions. SAFE_DIVIDE handles potential division by zero errors.
+    SAFE_DIVIDE(
+        COUNT(distinct case when session_engaged = true then concat(user_pseudo_id,session_id) end),
+        COUNT(DISTINCT session_id)
+    ) AS engagement_rate,
+    -- Other metrics are calculated similarly using conditional aggregation and window functions
+    COUNT(distinct case when session_engaged = true then concat(user_pseudo_id,session_id) end) as engaged_sessions_per_user,
+    SAFE_DIVIDE(
+        COUNTIF(session_conversion = true),
+        COUNT(DISTINCT session_id)
+    ) AS session_conversion_rate,
+    COUNT(distinct case when session_engaged = false then concat(user_pseudo_id,session_id) end) as bounces,
+    SAFE_DIVIDE(
+        COUNT(distinct case when session_engaged = false then concat(user_pseudo_id,session_id) end),
+        COUNT(DISTINCT session_id)
+    ) as bounce_rate_per_user,
+    COUNT(DISTINCT session_id) AS sessions_per_user,
+    IFNULL(AVG(page_views_per_session),0) as avg_views_per_session,
+    IFNULL(ROUND(SUM(engagement_time_msec)/1000),0) as sum_engagement_time_seconds,
+    IFNULL(ROUND(AVG(engagement_time_msec)/1000),0) as avg_engagement_time_seconds,
+    COUNTIF(new_visitor = true) as new_visits,
+    COUNTIF(returning_visitor = true) as returning_visits
+  FROM ( 
+    -- The metrics are calculated from a subquery that joins the event, session, and device tables. 
+    -- The outer query then groups the results by user_pseudo_id and feature_date.
+    SELECT
+        E.user_pseudo_id,
+        input_date as feature_date,
+        E.ga_session_id as session_id,
+        IFNULL(MAX(S.session_engaged), false) as session_engaged,
+        SUM(S.total_engagement_time_secs) as engagement_time_msec,
+        MAX(S.new_visitor) as new_visitor,
+        MAX(S.returning_visitor) as returning_visitor,
+        MAX(CASE WHEN E.event_name='purchase' AND E.ecommerce.transaction_id IS NOT NULL THEN true ELSE false END) as session_conversion,
+        COUNTIF(E.event_name='page_view') as page_views_per_session
+    FROM `{{mds_project_id}}.{{mds_dataset}}.event` as E
+    INNER JOIN `{{mds_project_id}}.{{mds_dataset}}.session` as S
+    ON E.ga_session_id = S.ga_session_id
+    INNER JOIN `{{mds_project_id}}.{{mds_dataset}}.device` as D
+    ON E.device_type_id = D.device_type_id
+    CROSS JOIN dates_interval as DI
+    WHERE E.event_date BETWEEN DI.end_date AND DI.input_date
+        AND E.ga_session_id IS NOT NULL
+        AND D.device_os IS NOT NULL
+    GROUP BY
+        user_pseudo_id,
+        feature_date,
+        session_id)
+  GROUP BY user_pseudo_id, feature_date
+);
+
+-- Has the user purchased before, another day?
+-- determine how many times a user has made a purchase before on a given day. 
+-- It identifies returning customers, combines them with non-returning customers, and then calculates the count of 
+-- previous purchases for each user on each day. This information can be valuable for understanding customer 
+-- purchase patterns and segmenting users based on their purchase history.
+--
+-- This block creates a temporary table named returning_customers to store information about users who have made multiple purchases.
+CREATE OR REPLACE TEMP TABLE returning_customers as (
+  SELECT 
+    user_pseudo_id, 
+    feature_date, 
+    MAX(unique_purchase) as unique_purchase  
+  FROM (
+      -- This subquery calculates the unique_purchase rank for each purchase event. It uses the RANK() window function 
+      -- to assign a rank to each purchase event based on the event_timestamp for each user_pseudo_id. The earliest 
+      -- purchase gets rank 1, the next gets rank 2, and so on.
+      SELECT 
+          user_pseudo_id, 
+          input_date as feature_date, 
+          RANK() OVER (PARTITION BY user_pseudo_id ORDER BY event_timestamp ASC) AS unique_purchase
+      FROM `{{mds_project_id}}.{{mds_dataset}}.event` AS GA
+      CROSS JOIN dates_interval as DI
+      WHERE event_date BETWEEN DI.end_date AND DI.input_date
+      AND event_name = 'purchase'
+      GROUP BY user_pseudo_id, feature_date, event_timestamp
+  )
+  --  It retrieves the user_pseudo_id, feature_date, and the maximum value of unique_purchase 
+  -- (which represents the purchase rank for a user) from a subquery. The WHERE unique_purchase >= 2 
+  -- condition filters for users who have made at least two purchases.
+  WHERE unique_purchase >= 2
+  GROUP BY user_pseudo_id, feature_date
+);
+-- This block creates a temporary table named non_returning_customers to store information about users 
+-- who have made only one purchase or no purchases at all.
+CREATE OR REPLACE TEMP TABLE non_returning_customers as ( 
+  SELECT
+        GA.user_pseudo_id,
+        input_date as feature_date
+  FROM `{{mds_project_id}}.{{mds_dataset}}.event` AS GA
+  CROSS JOIN dates_interval as DI
+  WHERE event_date BETWEEN DI.end_date AND DI.input_date
+  GROUP BY user_pseudo_id, feature_date
+  -- This effectively filters out users who have made multiple purchases, leaving only 
+  -- those with a single purchase or no purchases.
+  EXCEPT DISTINCT SELECT user_pseudo_id, feature_date FROM returning_customers as RC
+);
+-- This block creates a temporary table named combined to store the combined data of returning and non-returning customers.
+CREATE OR REPLACE TEMP TABLE combined as (
+  SELECT 
+    user_pseudo_id, 
+    feature_date, 
+    unique_purchase
+  FROM returning_customers  
+  UNION ALL
+  -- The second subquery selects data from the non_returning_customers table and assigns a unique_purchase value of -1 to all records. 
+  -- This distinguishes them from returning customers.
+  SELECT 
+    user_pseudo_id, 
+    feature_date, 
+    -1
+    FROM non_returning_customers 
+  GROUP BY user_pseudo_id, feature_date
+);
+-- This block creates a temporary table named repeated_purchase to store the count of previous purchases for each user on each day.
+CREATE OR REPLACE TEMP TABLE repeated_purchase as (
+  SELECT
+    user_pseudo_id,
+    feature_date, 
+    -- If unique_purchase is greater than or equal to 0 (meaning the user is a returning customer), 
+    -- the how_many_purchased_before value is set to the unique_purchase value (representing the number of previous purchases).
+    -- If unique_purchase is less than 0 (meaning the user is a non-returning customer), the how_many_purchased_before value is set to 0.
+    CASE WHEN unique_purchase >= 0 THEN unique_purchase ELSE 0 END AS how_many_purchased_before
+  FROM 
+    combined
+);
+
+-- Has the user abandoned any cart by day?
+-- This block creates a temporary table named returned_cart_to_purchase to store information about users who initiated the checkout process but didn't complete a purchase.
+CREATE OR REPLACE TEMP TABLE returned_cart_to_purchase as (
+  SELECT 
+  user_pseudo_id, 
+  feature_date,
+  -- The highest session number for the user on that day.
+  MAX(session_order) as max_session_order_in_day, 
+  -- A flag indicating if the user initiated checkout at least once that day.
+  CASE WHEN MAX(begun_checkout) >= 1 THEN True ELSE False END as begun_checkout, 
+  -- A flag indicating if the user completed a purchase at least once that day.
+  CASE WHEN MAX(event_order) >= 2 THEN True ELSE False END as has_purchased  
+  FROM (
+      -- This subquery retrieves user activity related to 'begin_checkout' and 'purchase' events. It calculates:
+      -- session_order: The session number for each event.
+      -- begun_checkout: A flag indicating if the 'begin_checkout' event occurred in the session.
+      -- event_order: A rank assigned to each event based on the event_timestamp for each user.
+      SELECT 
+          GA.user_pseudo_id, 
+          input_date as feature_date,
+          MAX(S.session_number) as session_order,
+          CASE WHEN MAX(event_name) = 'begin_checkout' THEN 1 ELSE 0 END as begun_checkout,
+          RANK() OVER (PARTITION BY GA.user_pseudo_id ORDER BY event_timestamp ASC ) AS event_order
+      FROM `{{mds_project_id}}.{{mds_dataset}}.event` AS GA
+      INNER JOIN `{{mds_project_id}}.{{mds_dataset}}.session` as S
+      ON GA.ga_session_id = S.ga_session_id
+      INNER JOIN `{{mds_project_id}}.{{mds_dataset}}.device` as D
+      ON GA.device_type_id = D.device_type_id
+      CROSS JOIN dates_interval as DI
+      WHERE event_date BETWEEN DI.end_date AND DI.input_date
+          AND event_name IN ('begin_checkout','purchase')
+          AND GA.ga_session_id IS NOT NULL
+          AND D.device_os IS NOT NULL
+      GROUP BY GA.user_pseudo_id, feature_date, GA.event_timestamp
+  )
+  GROUP BY user_pseudo_id, feature_date
+);
+
+-- This block creates a temporary table named cart_to_purchase to store a flag indicating whether a user abandoned their cart on a given day.
+CREATE OR REPLACE TEMP TABLE cart_to_purchase AS (
+  -- This query joins the event table with the returned_cart_to_purchase table and calculates the has_abandoned_cart flag. 
+  -- It's considered abandoned if a user initiated checkout (begun_checkout is true) but didn't complete a purchase 
+  -- (has_purchased is false) on that day.
+  SELECT
+    GA.user_pseudo_id, 
+    input_date as feature_date,
+    CASE WHEN (MAX(r.begun_checkout) AND NOT MAX(r.has_purchased)) THEN True ELSE False END as has_abandoned_cart,
+  FROM `{{mds_project_id}}.{{mds_dataset}}.event` AS GA
+  INNER JOIN `{{mds_project_id}}.{{mds_dataset}}.device` as D
+    ON GA.device_type_id = D.device_type_id
+  CROSS JOIN dates_interval as DI
+  LEFT JOIN returned_cart_to_purchase AS r
+  ON r.user_pseudo_id = GA.user_pseudo_id AND r.feature_date = DI.input_date
+  WHERE event_date BETWEEN DI.end_date AND DI.input_date
+    AND GA.ga_session_id IS NOT NULL
+    AND D.device_os IS NOT NULL
+  GROUP BY user_pseudo_id, feature_date
+);
+
+-- What is the user-events-per-day event-scoped metrics performance?
+-- This block creates a temporary table named user_events_per_day_event_scoped to store 
+-- various user-level event metrics calculated on a daily basis.
+CREATE OR REPLACE TEMP TABLE user_events_per_day_event_scoped as (
+  SELECT
+    user_pseudo_id,
+    feature_date,
+    -- Total 'add_to_cart' events for the user on that day.
+    IFNULL(SUM(add_to_cart_per_session),0) as add_to_carts,
+    -- Ratio of 'add_to_cart' to 'view_item' events.
+    IFNULL(SAFE_DIVIDE(
+        SUM(add_to_cart_per_session),
+        SUM(view_item_per_session)
+    ), 0.0) AS cart_to_view_rate, 
+    -- Total 'begin_checkout' events.
+    IFNULL(SUM(checkouts_per_session),0) AS checkouts,
+    IFNULL(SUM(ecommerce_purchases_per_session),0) AS ecommerce_purchases,
+    IFNULL(SUM(ecommerce_quantity_per_session),0) AS ecommerce_quantity,
+    IFNULL(SUM(ecommerce_revenue_per_session),0) AS ecommerce_revenue,
+    --IFNULL(SUM(item_discount_per_session),0) AS item_discount_amount,
+    IFNULL(SUM(item_revenue_per_session),0.0) AS item_revenue,
+    IFNULL(SUM(item_quantity_per_session),0) AS item_quantity,
+    IFNULL(SUM(item_refund_amount_per_session),0.0) AS item_refund_amount,
+    IFNULL(SUM(item_view_events_per_session),0) AS item_view_events,
+    IFNULL(SUM(items_clicked_in_promotion_per_session),0) AS items_clicked_in_promotion,
+    IFNULL(SUM(items_clicked_in_list_per_session),0) AS items_clicked_in_list,
+    IFNULL(SUM(items_checked_out_per_session),0) AS items_checked_out,
+    IFNULL(SUM(items_added_to_cart_per_session),0) AS items_added_to_cart,
+    IFNULL(SUM(item_list_click_events_per_session),0) AS item_list_click_events,
+    IFNULL(SUM(item_list_view_events_per_session),0) AS item_list_view_events,
+    IFNULL(SUM(purchase_revenue_per_session),0.0) AS purchase_revenue,
+    IFNULL(SAFE_DIVIDE(
+        SUM(user_who_purchased_per_session),
+        SUM(user_who_viewed_items_per_session)
+    ), 0.0) AS purchase_to_view_rate,
+    IFNULL(SUM(refunds_per_session),0.0) AS refunds,
+    IFNULL(SAFE_DIVIDE(
+        SUM(transactions_per_session),
+        SUM(purchasers_per_session)
+    ), 0.0) AS transactions_per_purchaser,
+    IFNULL(SAFE_DIVIDE(
+        SUM(ecommerce_purchases_per_session),
+        COUNT(DISTINCT event_timestamp))
+        ,0.0) AS user_conversion_rate
+  FROM (
+    -- This subquery retrieves user event data and calculates metrics for each session, such as:
+    -- add_to_cart_per_session: Count of 'add_to_cart' events.
+    -- view_item_per_session: Count of 'view_item' events.
+    -- checkouts_per_session: Count of 'begin_checkout' events.
+    -- ecommerce_purchases_per_session: Count of successful 'purchase' events.
+    -- Various other metrics related to e-commerce activities, refunds, and item interactions.
+    SELECT
+        user_pseudo_id,
+        input_date as feature_date,
+        event_timestamp,
+        ga_session_id as session_id,
+        COUNTIF(event_name='add_to_cart') as add_to_cart_per_session,
+        COUNTIF(event_name='view_item') as view_item_per_session,
+        COUNTIF(event_name='begin_checkout') as checkouts_per_session,
+        COUNTIF(event_name='purchase' AND ecommerce.transaction_id IS NOT NULL) as ecommerce_purchases_per_session,
+        SUM(CASE WHEN event_name='purchase' AND ecommerce.transaction_id IS NOT NULL THEN ecommerce.total_item_quantity ELSE 0 END) as ecommerce_quantity_per_session,
+        SUM(CASE WHEN event_name='purchase' AND ecommerce.transaction_id IS NOT NULL THEN ecommerce.purchase_revenue_in_usd ELSE 0 END) as ecommerce_revenue_per_session,
+        --SUM((select SUM(discount*quantity) from unnest(items) where event_name = 'purchase' AND ecommerce.transaction_id IS NOT NULL AND discount IS NOT NULL)) as item_discount_per_session,
+        SUM((select SUM(item_revenue) from unnest(items) where event_name = 'purchase' AND ecommerce.transaction_id IS NOT NULL AND item_revenue IS NOT NULL)) as item_revenue_per_session,
+        SUM((select SUM(quantity) from unnest(items) where event_name = 'purchase' AND ecommerce.transaction_id IS NOT NULL AND quantity IS NOT NULL)) as item_quantity_per_session,
+        SUM((select item_refund from unnest(items) where event_name = 'purchase' AND ecommerce.transaction_id IS NOT NULL AND item_refund IS NOT NULL)) as item_refund_amount_per_session,
+        COUNTIF(event_name='view_item') as item_view_events_per_session,
+        SUM((select COUNT(DISTINCT item_id) from unnest(items) where event_name='view_item' AND (promotion_id IS NOT NULL OR promotion_name IS NOT NULL))) as items_clicked_in_promotion_per_session,
+        SUM((select COUNT(DISTINCT item_id) from unnest(items) where event_name='click' AND (item_list_id IS NOT NULL OR item_list_name IS NOT NULL))) as items_clicked_in_list_per_session,
+        SUM((select COUNT(DISTINCT item_id) from unnest(items) where event_name='begin_checkout' AND item_id IS NOT NULL)) as items_checked_out_per_session,
+        SUM((select COUNT(DISTINCT item_id) from unnest(items) where event_name='add_to_cart' AND item_id IS NOT NULL)) as items_added_to_cart_per_session,
+        SUM((select COUNT(DISTINCT item_list_id) from unnest(items) where event_name='click' AND (item_list_id IS NOT NULL OR item_list_name IS NOT NULL))) as item_list_click_events_per_session,
+        SUM((select COUNT(DISTINCT item_list_id) from unnest(items) where event_name='view_item_list' AND (item_list_id IS NOT NULL OR item_list_name IS NOT NULL))) as item_list_view_events_per_session,
+        (SUM(CASE WHEN event_name='purchase' AND ecommerce.transaction_id IS NOT NULL THEN ecommerce.purchase_revenue_in_usd ELSE 0.0 END) - SUM(CASE WHEN event_name='refund' AND ecommerce.transaction_id IS NOT NULL THEN ecommerce.refund_value_in_usd ELSE 0.0 END)) as purchase_revenue_per_session,
+        COUNT(DISTINCT CASE WHEN event_name='purchase' AND ecommerce.transaction_id IS NOT NULL THEN user_pseudo_id END) as user_who_purchased_per_session,
+        COUNT(DISTINCT CASE WHEN event_name='view_item' THEN user_pseudo_id END) as user_who_viewed_items_per_session,
+        SUM(CASE WHEN event_name='refund' AND ecommerce.transaction_id IS NOT NULL THEN 1 ELSE 0 END) as refunds_per_session,
+        COUNT(DISTINCT CASE WHEN ecommerce.transaction_id IS NOT NULL THEN ecommerce.transaction_id END) as transactions_per_session,
+        COUNT(DISTINCT CASE WHEN event_name='purchase' AND ecommerce.transaction_id IS NOT NULL THEN user_pseudo_id END) as purchasers_per_session,
+    FROM
+        `{{mds_project_id}}.{{mds_dataset}}.event` as E
+    INNER JOIN `{{mds_project_id}}.{{mds_dataset}}.device` as D
+        ON E.device_type_id = D.device_type_id
+    CROSS JOIN dates_interval as DI
+    WHERE event_date BETWEEN DI.end_date AND DI.input_date
+        AND E.ga_session_id IS NOT NULL
+        AND D.device_os IS NOT NULL
+    GROUP BY
+        E.user_pseudo_id,
+        E.ga_session_id,
+        feature_date,
+        E.event_timestamp)
+    GROUP BY user_pseudo_id, feature_date
+);
+
+-- All users in the platform
+-- This block creates a temporary table named events_users_days to 
+-- store a distinct list of users who had events on each day.
+CREATE OR REPLACE TEMP TABLE events_users_days as (
+  SELECT DISTINCT
+    Users.user_pseudo_id,
+    DI.input_date as feature_date
+  FROM `{{mds_project_id}}.{{mds_dataset}}.event` Users 
+  INNER JOIN `{{mds_project_id}}.{{mds_dataset}}.device` as D
+    ON Users.device_type_id = D.device_type_id
+  CROSS JOIN dates_interval as DI
+  WHERE event_date BETWEEN DI.end_date AND DI.input_date
+    AND Users.ga_session_id IS NOT NULL
+    AND D.device_os IS NOT NULL
+);
+
+-- This code snippet combines data from multiple temporary tables to create a 
+-- comprehensive view of user behavior and engagement metrics. The resulting data 
+-- in the target table can be used for various analytical purposes, such as building 
+-- machine learning models, generating reports, or understanding user segmentation based 
+-- on their interactions with the platform.
+--
+-- The code utilizes data from several temporary tables, each created and populated in previous steps of the SQL script. These tables are:
+-- events_users_days (EUD): Contains a distinct list of users (user_pseudo_id) and dates (feature_date) representing days when users had events.
+-- engagement_per_day_session_scoped (EPDSS): Stores user engagement metrics calculated at a session level and then aggregated to the user-day level. Metrics include engagement_rate, engaged_sessions_per_user, session_conversion_rate, bounces, etc.
+-- user_events_per_day_event_scoped (UEPDES): Contains user-level event metrics aggregated on a daily basis. Metrics include add_to_carts, cart_to_view_rate, checkouts, ecommerce_purchases, etc.
+-- repeated_purchase (R): Stores information about whether a user has made previous purchases, indicated by the how_many_purchased_before column.
+-- cart_to_purchase (CP): Contains a flag (has_abandoned_cart) indicating whether a user abandoned their cart on a given day.
+INSERT INTO `{{project_id}}.{{dataset}}.{{insert_table}}` (
+  processed_timestamp,
+  feature_date,
+  user_pseudo_id,
+  engagement_rate,
+  engaged_sessions_per_user,
+  session_conversion_rate,
+  bounces,
+  bounce_rate_per_user,
+  sessions_per_user,
+  avg_views_per_session,
+  sum_engagement_time_seconds,
+  avg_engagement_time_seconds,
+  new_visits,
+  returning_visits,
+  add_to_carts,
+  cart_to_view_rate,
+  checkouts,
+  ecommerce_purchases,
+  ecommerce_quantity,
+  ecommerce_revenue,
+  item_revenue,
+  item_quantity,
+  item_refund_amount,
+  item_view_events,
+  items_clicked_in_promotion,
+  items_clicked_in_list,
+  items_checked_out,
+  items_added_to_cart,
+  item_list_click_events,
+  item_list_view_events,
+  purchase_revenue,
+  purchase_to_view_rate,
+  refunds,
+  transactions_per_purchaser,
+  user_conversion_rate,
+  how_many_purchased_before,
+  has_abandoned_cart
+)
+  SELECT
+    CURRENT_TIMESTAMP() AS processed_timestamp,
+    EUD.feature_date,
+    EUD.user_pseudo_id,
+    EPDSS.engagement_rate,
+    EPDSS.engaged_sessions_per_user,
+    EPDSS.session_conversion_rate,
+    EPDSS.bounces,
+    EPDSS.bounce_rate_per_user,
+    EPDSS.sessions_per_user,
+    EPDSS.avg_views_per_session,
+    EPDSS.sum_engagement_time_seconds,
+    EPDSS.avg_engagement_time_seconds,
+    EPDSS.new_visits,
+    EPDSS.returning_visits,
+    UEPDES.add_to_carts,
+    UEPDES.cart_to_view_rate,
+    UEPDES.checkouts,
+    UEPDES.ecommerce_purchases,
+    UEPDES.ecommerce_quantity,
+    UEPDES.ecommerce_revenue,
+    UEPDES.item_revenue,
+    UEPDES.item_quantity,
+    UEPDES.item_refund_amount,
+    UEPDES.item_view_events,
+    UEPDES.items_clicked_in_promotion,
+    UEPDES.items_clicked_in_list,
+    UEPDES.items_checked_out,
+    UEPDES.items_added_to_cart,
+    UEPDES.item_list_click_events,
+    UEPDES.item_list_view_events,
+    UEPDES.purchase_revenue,
+    UEPDES.purchase_to_view_rate,
+    UEPDES.refunds,
+    UEPDES.transactions_per_purchaser,
+    UEPDES.user_conversion_rate,
+    R.how_many_purchased_before,
+    CP.has_abandoned_cart
+  FROM events_users_days EUD
+  INNER JOIN engagement_per_day_session_scoped EPDSS
+  ON EUD.user_pseudo_id = EPDSS.user_pseudo_id AND EUD.feature_date = EPDSS.feature_date
+  INNER JOIN user_events_per_day_event_scoped UEPDES
+  ON UEPDES.user_pseudo_id = EPDSS.user_pseudo_id AND UEPDES.feature_date = EPDSS.feature_date
+  INNER JOIN repeated_purchase R
+  ON R.user_pseudo_id = EPDSS.user_pseudo_id AND R.feature_date = EPDSS.feature_date
+  INNER JOIN cart_to_purchase CP
+  ON CP.user_pseudo_id = EPDSS.user_pseudo_id AND CP.feature_date = EPDSS.feature_date
+;

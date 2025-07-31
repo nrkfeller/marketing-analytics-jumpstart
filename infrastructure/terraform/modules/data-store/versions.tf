@@ -15,11 +15,21 @@
 terraform {
   required_version = ">=1.3.7"
 
+  # Check the latest version at https://registry.terraform.io/providers/hashicorp/google
+  # Observe the changelogs at https://github.com/hashicorp/terraform-provider-google/blob/main/CHANGELOG.md
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "4.49.0"
+      version = "5.45.0"
     }
 
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "5.45.0"
+    }
+  }
+
+  provider_meta "google" {
+    module_name = "cloud-solutions/mas-marketing-analytics-jumpstart-dataform-deploy-v1.0" #x-release-please-minor
   }
 }

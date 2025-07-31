@@ -12,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+variable "tf_state_project_id" {
+  description = "Google Cloud project where the terraform state file is stored"
+  type        = string
+}
+
+variable "main_project_id" {
+  type        = string
+  description = "Project ID where feature store resources are created"
+}
+
 variable "data_project_id" {
   description = "Default project to contain the MDS BigQuery datasets"
   type        = string
@@ -33,13 +43,25 @@ variable "google_default_region" {
   type        = string
 }
 
+variable "dataform_region" {
+  description = "Specify dataform region when dataform is not available in the default cloud region of choice"
+  type        = string
+  default     = ""
+}
+
+variable "dataform_workspace" {
+  description = "Dataform workspace name"
+  type        = string
+  default     = "demo"
+}
+
 variable "project_owner_email" {
   description = "Email address of the project owner."
   type        = string
 }
 
 variable "dataform_github_repo" {
-  description = "Private Github repo for Dataform."
+  description = "Private GitHub repo for Dataform."
   type        = string
   validation {
     condition     = substr(var.dataform_github_repo, 0, 8) == "https://"
@@ -48,7 +70,7 @@ variable "dataform_github_repo" {
 }
 
 variable "dataform_github_token" {
-  description = "Github token for Dataform repo."
+  description = "GitHub token for Dataform repo."
   type        = string
 }
 
@@ -64,12 +86,6 @@ variable "pipelines_github_owner" {
   default     = "temporarily unused"
 }
 
-variable "create_dev_environment" {
-  description = "Indicates that a development environment needs to be created"
-  type        = bool
-  default     = true
-}
-
 variable "dev_data_project_id" {
   description = "Project ID of where the dev datasets will created. If not provided, data_project_id will be used."
   type        = string
@@ -80,12 +96,6 @@ variable "dev_destination_data_location" {
   description = "Location for the MDS BigQuery dev datasets. If not provided destination_data_location will be used."
   type        = string
   default     = ""
-}
-
-variable "create_staging_environment" {
-  description = "Indicates that a staging environment needs to be created"
-  type        = bool
-  default     = true
 }
 
 variable "staging_data_project_id" {
@@ -100,10 +110,10 @@ variable "staging_destination_data_location" {
   default     = ""
 }
 
-variable "create_prod_environment" {
-  description = "Indicates that a production environment needs to be created"
-  type        = bool
-  default     = true
+variable "property_id" {
+  description = "Google Analytics 4 Property ID to install the MDS"
+  type        = string
+  default     = ""
 }
 
 variable "prod_data_project_id" {
@@ -128,6 +138,12 @@ variable "source_ga4_export_dataset" {
   type        = string
 }
 
+variable "ga4_incremental_processing_days_back" {
+  description = "Past number of days to process GA4 exported data"
+  type        = string
+  default     = "3"
+}
+
 variable "source_ads_export_data" {
   description = "List of BigQuery's Ads Data Transfer datasets"
   type = list(object({
@@ -142,6 +158,16 @@ variable "activation_project_id" {
   description = "Project ID where activation resources are created"
 }
 
+variable "ga4_property_id" {
+  description = "Google Analytics property id"
+  type        = string
+}
+
+variable "ga4_stream_id" {
+  description = "Google Analytics data stream id"
+  type        = string
+}
+
 variable "ga4_measurement_id" {
   description = "Measurement ID in GA4"
   type        = string
@@ -154,6 +180,18 @@ variable "ga4_measurement_secret" {
   type        = string
   default     = null
   sensitive   = true
+}
+
+variable "deploy_dataform" {
+  description = "Toggler for activation module"
+  type        = bool
+  default     = false
+}
+
+variable "deploy_purchase_propensity" {
+  description = "Toggler for purchase propensity module"
+  type        = bool
+  default     = false
 }
 
 variable "deploy_activation" {
@@ -174,25 +212,230 @@ variable "deploy_pipelines" {
   default     = false
 }
 
+variable "deploy_monitoring" {
+  description = "Toggler for monitoring module"
+  type        = bool
+  default     = false
+}
+
 variable "mds_dataset_prefix" {
   description = "Marketing data store dataset prefix"
   type        = string
   default     = "marketing_ga4_v1"
 }
 
-variable "feature_store_config_env" {
-  description = "determine which config file is used for feature store deployment"
+variable "global_config_env" {
+  description = "determine which config file is used for globaly for deployment"
   type        = string
   default     = "config"
 }
 
-variable "poetry_cmd" {
-  description = "alias for poetry run command on the current system"
+variable "uv_cmd" {
+  description = "alias for uv run command on the current system"
   type        = string
-  default     = "poetry"
+  default     = "uv"
 }
 
 variable "feature_store_project_id" {
   type        = string
   description = "Project ID where feature store resources are created"
+}
+
+variable "website_url" {
+  description = "Website url to be provided to the auto segmentation model"
+  type        = string
+  default     = null
+}
+
+variable "time_zone" {
+  description = "Timezone for scheduled jobs"
+  type        = string
+  default     = "America/New_York"
+}
+
+variable "pipeline_configuration" {
+  description = "Pipeline configuration that will alternate certain settings in the config.yaml.tftpl"
+  type = map(
+    map(
+      object({
+        schedule        = object({
+          # The `state` defines the state of the pipeline.
+          # In case you don't want to schedule the pipeline, set the state to `PAUSED`.
+          state                    = string
+        })
+      })
+    )
+  )
+
+  default = {
+    feature-creation-auto-audience-segmentation = {
+      execution = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    feature-creation-audience-segmentation = {
+      execution = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    feature-creation-purchase-propensity = {
+      execution = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    feature-creation-churn-propensity = {
+      execution = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    feature-creation-customer-ltv = {
+      execution = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    feature-creation-aggregated-value-based-bidding = {
+      execution = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    feature-creation-lead-score-propensity = {
+      execution = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    value_based_bidding = {
+      training = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+      explanation = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    purchase_propensity = {
+      training = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+      prediction = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    churn_propensity = {
+      training = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+      prediction = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    segmentation = {
+      training = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+      prediction = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    auto_segmentation = {
+      training = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+      prediction = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    propensity_clv = {
+      training = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+      prediction = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    clv = {
+      training = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+      prediction = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+    lead_score_propensity = {
+      training = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+      prediction = {
+        schedule = {
+          state                    = "PAUSED"
+        }
+      }
+    }
+  }
+  validation {
+    condition = alltrue([
+      for p in keys(var.pipeline_configuration) : alltrue([
+        for c in keys(var.pipeline_configuration[p]) : (
+          try(var.pipeline_configuration[p][c].schedule.state, "") == "ACTIVE" ||
+          try(var.pipeline_configuration[p][c].schedule.state, "") == "PAUSED"
+        )
+      ])
+    ])
+    error_message = "The 'state' field must be either 'PAUSED' or 'ACTIVE' for all pipeline configurations."
+  }
+}
+
+
+variable "non_ecomm_events_list" {
+  description = "Short list of prioritized events that are correlated to the non ecommerce target event"
+  type = list(string)
+  default = ["scroll_50", "view_search_results"]
+}
+
+variable "non_ecomm_target_event" {
+  description = "Non ecommerce target event for the lead score propensity feature transformation"
+  type        = string
+  default     = "login"
 }

@@ -40,11 +40,12 @@ if os.path.exists(config_file_path):
     base_image = f"{repo_params['region']}-docker.pkg.dev/{repo_params['project_id']}/{repo_params['name']}/{vertex_components_params['base_image_name']}:{vertex_components_params['base_image_tag']}"
 
 
+
+
 @component(
     base_image=base_image,
     #target_image=target_image,
     #packages_to_install=packages_to_install
-    
 )
 def elect_best_tabular_model(
     project: str,
@@ -164,7 +165,18 @@ def elect_best_tabular_model(
     #th_arr = []
     for k,v in best_eval_metrics.items():
         if k in MetricsEnum.list():
+            logging.info(f"Metrics Logger: Model Evaluation Metric name {k} and value {v}")
+            def _isnan(value):
+                try:
+                    import math
+                    return math.isnan(float(value))
+                except:
+                    return False
+            
+            if _isnan(v):
+                v = "0"
             metrics_logger.log_metric(k, v)
+
         
         elif k == 'confidenceMetrics':
             for confidence_metrics in v:
@@ -196,12 +208,13 @@ def elect_best_tabular_model(
     elected_model.schema_title = 'google.VertexModel'
     #classification_metrics_logger.log_roc_curve(fpr_arr,tpr_arr, th_arr)
 
+
+
     
 @component(
     base_image=base_image,
     #target_image=target_image,
-    #packages_to_install=packages_to_install
-    
+    #packages_to_install=packages_to_install 
 )
 def get_latest_model(
     project: str,
@@ -209,7 +222,20 @@ def get_latest_model(
     display_name: str,
     elected_model: Output[VertexModel]
 ) -> None:
-    """
+    """Vertex pipelines component that elects the latest model based on the display name.
+
+    Args:
+        project (str):
+            Project to retrieve models and model registry from
+        location (str):
+            Location to retrieve models and model registry from
+        display_name (str):
+            The display name of the model for which selection is going to be made
+        elected_model: Output[VertexModel]:
+            The output VertexModel object containing the latest model information.
+
+    Raises:
+        Exception: If no models are found in the vertex model registry that match the display name.
     """
   
     from google.cloud import aiplatform as aip
@@ -230,11 +256,11 @@ def get_latest_model(
         def list(cls):
             return list(map(lambda c: c.value, cls))
 
-    number_of_models_considered: int= 1
+    number_of_models_considered: int = 1
 
     logging.info(display_name)
     aip.init(project=project, location=location)  
-    models = aip.Model.list(filter=f'display_name="{display_name}"')
+    models = aip.Model.list(filter=f'display_name="{display_name}"', order_by=f"create_time desc")
     
     models_versions_to_compare = []
 
@@ -243,9 +269,9 @@ def get_latest_model(
     for model in models:
         model_registry = aip.ModelRegistry(model=model.name)
         for v in model_registry.list_versions():
-            if(counter<number_of_models_considered):
+            if counter < number_of_models_considered:
                 models_versions_to_compare.append(v)
-                counter+=1
+                counter += 1
             else:
                 canditate_v = v
                 for idx, mv in enumerate(models_versions_to_compare):
@@ -254,10 +280,10 @@ def get_latest_model(
                         models_versions_to_compare[idx] = canditate_v
                         canditate_v = tmp
  
-    if len(models_versions_to_compare)==0:
+    if len(models_versions_to_compare) == 0:
         raise Exception(f"No models in vertex model registry match '{display_name}'")
 
-    model= models_versions_to_compare[0]
+    model = models_versions_to_compare[0]
 
     logging.info(f"Selected model : {model}")
 
@@ -274,6 +300,7 @@ def get_latest_model(
 
 
 
+
 @component(base_image=base_image)
 def batch_prediction(
     destination_table: Output[Dataset],
@@ -281,46 +308,197 @@ def batch_prediction(
     bigquery_destination_prefix: str,
     job_name_prefix: str,
     model: Input[VertexModel],
-    machine_type: str = "n1-standard-4",
+    machine_type: str = "n1-standard-2",
     max_replica_count: int = 10,
     batch_size: int = 64,
     accelerator_count: int = 0,
     accelerator_type: str = None,
-    generate_explanation: bool =False
-    ):
-    from datetime import datetime
+    generate_explanation: bool = False,
+    dst_table_expiration_hours: int = 0
+):
+    """Vertex pipelines component that performs batch prediction using a Vertex AI model.
+
+    Args:
+        destination_table (Output[Dataset]):
+            The output BigQuery table where the predictions will be stored.
+        bigquery_source (str):
+            The BigQuery table containing the data to be predicted.
+        bigquery_destination_prefix (str):
+            The BigQuery table prefix where the predictions will be stored.
+        job_name_prefix (str):
+            The prefix for the batch prediction job name.
+        model (Input[VertexModel]):
+            The Vertex AI model to be used for prediction.
+        machine_type (str, optional):
+            The machine type to use for the batch prediction job. Defaults to "n1-standard-2".
+        max_replica_count (int, optional):
+            The maximum number of replicas to use for the batch prediction job. Defaults to 10.
+        batch_size (int, optional):
+            The batch size to use for the batch prediction job. Defaults to 64.
+        accelerator_count (int, optional):
+            The number of accelerators to use for the batch prediction job. Defaults to 0.
+        accelerator_type (str, optional):
+            The type of accelerators to use for the batch prediction job. Defaults to None.
+        generate_explanation (bool, optional):
+            Whether to generate explanations for the predictions. Defaults to False.
+        dst_table_expiration_hours (int, optional):
+            The number of hours after which the destination table will expire. Defaults to 0.
+
+    Raises:
+        Exception: If the batch prediction job fails.
+    """
+
+    from datetime import datetime, timedelta, timezone
     import logging
+    from google.cloud import bigquery
     from google.cloud.aiplatform import Model
     model = Model(f"{model.metadata['resourceName']}@{model.metadata['version']}")
-
-
     timestamp = str(int(datetime.now().timestamp()))
-    #destination_table.metadata["table_id"] = f"{bigquery_destination_prefix}_{timestamp}"
-    #destination_table.metadata["predictions_column_prefix"] = "predicted_"
 
     batch_prediction_job = model.batch_predict(
-        job_display_name = f"{job_name_prefix}-{timestamp}",
-        instances_format = "bigquery",
-        predictions_format = "bigquery",
-        bigquery_source = f"bq://{bigquery_source}",
-        bigquery_destination_prefix= f"bq://{bigquery_destination_prefix}",
-        #bigquery_destination_prefix = f"bq://{destination_table.metadata['table_id']}",
-        machine_type = machine_type,
-        max_replica_count = max_replica_count,
-        batch_size = batch_size,
-        accelerator_count = accelerator_count,
-        accelerator_type = accelerator_type,
-        generate_explanation = generate_explanation 
+        job_display_name=f"{job_name_prefix}-{timestamp}",
+        instances_format="bigquery",
+        predictions_format="bigquery",
+        bigquery_source=f"bq://{bigquery_source}",
+        bigquery_destination_prefix=f"bq://{bigquery_destination_prefix}",
+        machine_type=machine_type,
+        max_replica_count=max_replica_count,
+        batch_size=batch_size,
+        accelerator_count=accelerator_count,
+        accelerator_type=accelerator_type,
+        generate_explanation=generate_explanation
     )
 
     batch_prediction_job.wait()
 
-    #Filling the destination_table with the bigquery destination table.
+    # Filling the destination_table with the bigquery destination table.
     destination_table.metadata["table_id"] = f"{batch_prediction_job.to_dict()['outputInfo']['bigqueryOutputDataset'].replace('bq://','')}.{batch_prediction_job.to_dict()['outputInfo']['bigqueryOutputTable']}"
     destination_table.metadata["predictions_column_prefix"] = "predicted_"
+    destination_table.metadata["predictions_column"] = "prediction"
+    destination_table.metadata["predictions_prob_column"] = "prediction_prob"
+
+    if dst_table_expiration_hours > 0:
+        client = bigquery.Client(project=model.project)
+        table = client.get_table(destination_table.metadata["table_id"])
+        expiration = datetime.now(timezone.utc) + timedelta(
+            hours=dst_table_expiration_hours
+        )
+        table.expires = expiration
+        client.update_table(table, ["expires"])
 
     logging.info(batch_prediction_job.to_dict())
-    #logging.info(batch_prediction_job.display_name)
-    #logging.info(batch_prediction_job.resource_name)
-    #logging.info(batch_prediction_job.state)
+
+
+
+
+@component(base_image=base_image)
+# Note currently KFP SDK doesn't support outputting artifacts in `google` namespace.
+# Use the base type dsl.Artifact instead.
+def return_unmanaged_model(
+    image_uri: str,
+    bucket_name: str,
+    model_name: str,
+    model: Output[Artifact]
+) -> None:
+    """Vertex pipelines component that returns an unmanaged model artifact.
+
+    Args:
+        image_uri (str):
+            The URI of the container image for the unmanaged model.
+        bucket_name (str):
+            The name of the Google Cloud Storage bucket where the unmanaged model is stored.
+        model_name (str):
+            The name of the unmanaged model file in the Google Cloud Storage bucket.
+        model (Output[Artifact]):
+            The output VertexModel artifact.
+
+    Raises:
+        Exception: If the model artifact cannot be created.
+    """
+    from google_cloud_pipeline_components import v1
+    from google_cloud_pipeline_components.types import artifact_types
+    from kfp import dsl
+
+    model_uri = f"gs://{bucket_name}/{model_name}"
+    model.metadata['containerSpec'] = {
+        'imageUri':
+            f"{image_uri}"
+    }
+    model.uri = model_uri
     
+
+
+# Create tabular model explanation component
+@component(base_image=base_image)
+def get_tabular_model_explanation(
+    project: str,
+    location: str,
+    model: Input[VertexModel],
+    model_explanation: Output[Dataset],
+) -> None:
+    """Vertex pipelines component that retrieves tabular model explanations from the AutoML API.
+
+    Args:
+        project (str):
+            Project to retrieve models and model registry from
+        location (str):
+            Location to retrieve models and model registry from
+        model (Input[VertexModel]):
+            The Vertex AI model for which explanations will be retrieved.
+        model_explanation (Output[Dataset]):
+            The output BigQuery dataset where the model explanations will be stored.
+
+    Raises:
+        Exception: If the model explanations cannot be retrieved.
+    """
+    from google.cloud import aiplatform
+    import logging
+    import re
+
+    #Get explanaitions from the AutoML API
+    aiplatform.init(project=project, location=location)
+    model = aiplatform.Model(model.metadata["resourceName"]) # exmaple: 'projects/mde-aggregated-vbb/locations/us-central1/models/1391715638950494208' # replace with your model id
+    model_evals = model.api_client.select_version('v1beta1').list_model_evaluations(parent=model.resource_name)
+
+    #Get model id
+    model_id = model.resource_name.split('/')[-1]
+
+    #Get model name
+    model_name = model.display_name
+
+    #Get model version
+    model_version = model.version_id
+    logging.info(model_version)
+
+    # convert the pager format into lists containing Json
+    modelEvalJson= []
+    for val in model_evals:
+        #print(val.model_explanation)
+        modelEvalJson.append(val.model_explanation)
+    modelEvalJson = modelEvalJson[0] # keep only the json data
+
+    # Filter the API response pager to keep only keys as feature_name and values as the coefficients
+    # Extract values using regular expressions in 2 lists
+    feature_names = re.findall(r'(?<=key: ").*?(?=")', str(modelEvalJson))
+    values = re.findall(r"(?<=number_value: )[0-9]+\.[0-9]+", str(modelEvalJson))
+
+    #DEBUG PRINT: print the extracted feature names and values
+    logging.info(feature_names)
+    logging.info(values)
+
+    # Format data as rows for BigQuery insertion
+    rows_to_insert = [
+        dict(zip(['feature_names', 'values'], row))
+        for row in zip(feature_names, values)
+    ]
+
+    # Component output
+    model_explanation.metadata = {
+        'model_id': model_id,
+        'model_name': model_name,
+        'model_version': model_version,
+        'model_uri': f"https://{location}-aiplatform.googleapis.com/v1/{model.resource_name}/versions/{model.version_id}",
+        'feature_names': feature_names,
+        'values': values,
+        }
+

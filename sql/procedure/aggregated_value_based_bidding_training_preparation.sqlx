@@ -1,0 +1,164 @@
+-- Copyright 2023 Google LLC
+--
+-- Licensed under the Apache License, Version 2.0 (the "License");
+-- you may not use this file except in compliance with the License.
+-- You may obtain a copy of the License at
+--
+--     http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing, software
+-- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
+
+
+-- During training, due to the lack of enough training samples
+-- Training subset is replicated a few times. This is equivalent to training for more epochs.
+-- Since we intend to overfit the ML model to get an accurate representation 
+-- of the feature importance, there is no problem in applying this strategy.
+-- Validation and test subsets are not replicated.
+
+-- This code snippet defines a BigQuery SQL view named {{view_name}} 
+-- in the project {{project_id}} and dataset {{dataset}}. 
+-- The view is used for training the Aggregated value-based bidding model.
+
+-- The view schema should match with the `transformations-value-based-bidding.json` file.
+-- Taking into consideration the excluded_features as listed in the `config.yaml` file.
+--
+-- The view schema includes the following columns:
+--    data_split: String indicating the data split (TRAIN, VALIDATE, TEST).
+--    Dt: Date of the data.
+--    First_Visits: SUM of first visits for each Date.
+--    Visit_Product_Page: SUM of visits to product pages for each Date.
+--    View_Product_Details: SUM of views of product details for each Date.
+--    Add_Product_to_Cart: SUM of times products were added to the cart for each Date.
+--    View_Cart: SUM of times the cart was viewed for each Date.
+--    Begin_Checkout: SUM of times checkout was initiated for each Date.
+--    Added_Shipping_Info: SUM of times shipping information was added for each Date.
+--    Added_Payment_Info: SUM of times payment information was added for each Date.
+--    Purchase_Product: SUM of purchases made for each Date.
+
+DECLARE min_date DATE DEFAULT NULL;
+DECLARE max_date DATE DEFAULT NULL;
+DECLARE MIN_NUMBER_OF_SAMPLES INT64 DEFAULT NULL;
+DECLARE MAX_LOOP_IT INT64 DEFAULT 1;
+DECLARE i INT64 DEFAULT 1;
+
+SET min_date = (SELECT MIN(Dt) FROM `{{mds_project_id}}.{{mds_dataset}}.aggregated_vbb`);
+SET max_date = (SELECT MAX(Dt) FROM `{{mds_project_id}}.{{mds_dataset}}.aggregated_vbb`);
+SET MIN_NUMBER_OF_SAMPLES = 1000;
+
+SET MAX_LOOP_IT = (SELECT CAST(CEIL(SAFE_DIVIDE(MIN_NUMBER_OF_SAMPLES, DATE_DIFF(max_date,min_date,DAY))) AS INT64));
+IF MAX_LOOP_IT <= i+1 THEN
+  SET MAX_LOOP_IT = 2;
+END IF;
+
+CREATE OR REPLACE TEMP TABLE ttable AS
+SELECT
+  CAST(NULL AS DATE) AS Dt,
+  CAST(NULL AS INT64) AS First_Visits,
+  CAST(NULL AS INT64) AS Visit_Product_Page,
+  CAST(NULL AS INT64) AS View_Product_Details,
+  CAST(NULL AS INT64) AS Add_Product_to_Cart,
+  CAST(NULL AS INT64) AS View_Cart,
+  CAST(NULL AS INT64) AS Begin_Checkout,
+  CAST(NULL AS INT64) AS Added_Shipping_Info,
+  CAST(NULL AS INT64) AS Added_Payment_Info,
+  CAST(NULL AS INT64) AS Purchase_Product;
+
+WHILE i < MAX_LOOP_IT DO
+    -- overwrite `ttable` with its previous contents union'ed
+    -- with new data results from current loop iteration
+    CREATE OR REPLACE TEMP TABLE ttable AS
+        SELECT
+          Dt,
+          First_Visits,
+          Visit_Product_Page,
+          View_Product_Details,
+          Add_Product_to_Cart,
+          View_Cart,
+          Begin_Checkout,
+          Added_Shipping_Info,
+          Added_Payment_Info,
+          Purchase_Product
+        FROM
+          `{{mds_project_id}}.{{mds_dataset}}.aggregated_vbb`
+        UNION ALL
+        SELECT * FROM ttable;
+
+    SET i = i + 1;
+END WHILE;
+
+CREATE OR REPLACE TABLE `{{project_id}}.{{dataset}}.{{table_name}}` AS (
+SELECT
+  "TRAIN" AS data_split,
+  Dt,
+  First_Visits,
+  Visit_Product_Page,
+  View_Product_Details,
+  Add_Product_to_Cart,
+  View_Cart,
+  Begin_Checkout,
+  Added_Shipping_Info,
+  Added_Payment_Info,
+  Purchase_Product
+FROM ttable -- UNION'ed results
+WHERE Dt IS NOT NULL
+UNION ALL
+SELECT
+  "VALIDATE" AS data_split,
+  Dt,
+  First_Visits,
+  Visit_Product_Page,
+  View_Product_Details,
+  Add_Product_to_Cart,
+  View_Cart,
+  Begin_Checkout,
+  Added_Shipping_Info,
+  Added_Payment_Info,
+  Purchase_Product
+FROM ttable -- UNION'ed results
+WHERE Dt IS NOT NULL
+UNION ALL
+SELECT
+  "TEST" AS data_split,
+  Dt,
+  First_Visits,
+  Visit_Product_Page,
+  View_Product_Details,
+  Add_Product_to_Cart,
+  View_Cart,
+  Begin_Checkout,
+  Added_Shipping_Info,
+  Added_Payment_Info,
+  Purchase_Product
+FROM ttable -- UNION'ed results
+WHERE Dt IS NOT NULL
+);
+
+-- The view is defined using a series of UNION ALL statements that combine data from 
+-- the aggregated_vbb table in the {{mds_project_id}}.{{mds_dataset}} dataset.
+--    The first three UNION ALL statements select data for the training split. Each statement selects the same data, effectively replicating it three times. This is done to increase the size of the training dataset and potentially improve model performance.
+--    The fourth UNION ALL statement selects data for the validation split, filtering for data within the specified eval_start_date and eval_end_date range.
+--    The fifth UNION ALL statement selects data for the test split, also filtering for data within the specified eval_start_date and eval_end_date range.
+CREATE OR REPLACE VIEW `{{project_id}}.{{dataset}}.{{view_name}}`
+(data_split,
+    Dt,
+    First_Visits,
+    Visit_Product_Page,
+    View_Product_Details,
+    Add_Product_to_Cart,
+    View_Cart,
+    Begin_Checkout,
+    Added_Shipping_Info,
+    Added_Payment_Info,
+    Purchase_Product
+)
+OPTIONS(
+    --expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL {{expiration_duration_hours}} HOUR),
+    friendly_name="aggregated_value_based_bidding_training_full_dataset",
+    description="View for aggregated value based bidding training dataset. View expires after 7d and should run daily.",
+    labels=[("org_unit", "development")]
+) AS 
+SELECT * FROM `{{project_id}}.{{dataset}}.{{table_name}}`;

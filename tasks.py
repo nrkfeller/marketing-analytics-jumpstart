@@ -15,6 +15,15 @@
 # Invoke tasks - a Python-equivelant of a Makefile or Rakefile.
 # http://www.pyinvoke.org/
 
+# The marketing analytics jumpstart uses the python pyinvoke 
+# library to automate tasks such as applying configuration parameters 
+# to all procedures, datasets, queries, and tables. This allows the user 
+# to easily generate new SQL files for each template without having to 
+# manually apply the configuration parameters. The pyinvoke library also 
+# provides a number of other tasks that can be used to automate other 
+# common tasks, such as running linting checks, applying fixes, and 
+# running unit tests.
+
 # LINTING NOTE: invoke doesn't support annotations in task signatures.
 # https://github.com/pyinvoke/invoke/issues/777
 # Workaround: add "  # noqa: ANN001, ANN201"
@@ -29,16 +38,46 @@ from pathlib import Path
 from jinja2 import Template
 from jinja2 import FileSystemLoader
 from jinja2 import Environment
+import re
 
 
 GOOGLE_CLOUD_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT")
 REGION = os.environ.get("REGION", "us-central1")
 
-
 @task
-def apply_env_variables_procedures(c, env_name="prod"):
+def apply_config_parameters_to_all_procedures(c, env_name="prod"):
+    """
+    Applies parameters from a configuration file to .sqlx stored procedure template files,
+    generating new .sql files for each template.
+
+    Args:
+        c (object): An object providing context for task execution (e.g., task runner).
+        env_name (str, optional): Name of the environment to use for configuration. Defaults to "prod".
+
+    Raises:
+        FileNotFoundError: If the specified configuration file is not found.
+        ValueError: If the configuration file is invalid or missing required keys.
+        TemplateError: If an error occurs during template rendering.
+
+    Example usage:
+        apply_config_parameters_to_all_procedures(my_task_context, env_name="dev")
+    
+    Customization:
+        1) Add a new parameter to .sqlx template file: Add the placeholder: 
+            a) Insert the new parameter's placeholder within the template file, surrounded 
+            by Jinja2's delimiters (e.g., {{ new_parameter }}) where you want its value to appear 
+            in the rendered output.
+            b) Add a new key-value pair for the new parameter under the appropriate section of 
+            your config.yaml.tftpl YAML configuration file. Ensure the key matches the placeholder 
+            name in the template.
+            c) No code changes required: The existing code already retrieves configuration values 
+            and renders them into templates, so it should handle the new parameter without modification.
+    """
+    # Load configuration file according to environment name
     current_path = Path(__file__).parent.resolve()
     conf = yaml.safe_load(Path.joinpath(current_path,"config", "{}.yaml".format(env_name)).read_text())
+
+    # Fetch all procedure configs <key,value> to be applied
     procedure_dict = conf['bigquery']['procedure']
 
     # Locate file path for all templates to be used
@@ -55,9 +94,37 @@ def apply_env_variables_procedures(c, env_name="prod"):
             with rendered_sql_file.open("w+", encoding ="utf-8") as f:
                 f.write(new_sql)
             print("New SQL file rendered at {}".format(rendered_sql_file))
-    
+
+
 @task
-def apply_env_variables_datasets(c, env_name="prod"):
+def apply_config_parameters_to_all_datasets(c, env_name="prod"):
+    """
+    Applies parameters from a configuration file to .sqlx dataset template files,
+    generating new .sql files for each template.
+
+    Args:
+        c (object): An object providing context for task execution (e.g., task runner).
+        env_name (str, optional): Name of the environment to use for configuration. Defaults to "prod".
+
+    Raises:
+        FileNotFoundError: If the specified configuration file is not found.
+        ValueError: If the configuration file is invalid or missing required keys.
+        TemplateError: If an error occurs during template rendering.
+
+    Example usage:
+        apply_config_parameters_to_all_datasets(my_task_context, env_name="dev")
+    
+    Customization:
+        1) Add a new parameter to .sqlx template file: Add the placeholder: 
+            a) Insert the new parameter's placeholder within the template file, surrounded 
+            by Jinja2's delimiters (e.g., {{ new_parameter }}) where you want its value to appear 
+            in the rendered output.
+            b) Add a new key-value pair for the new parameter under the appropriate section of 
+            your config.yaml.tftpl YAML configuration file. Ensure the key matches the placeholder 
+            name in the template.
+            c) No code changes required: The existing code already retrieves configuration values 
+            and renders them into templates, so it should handle the new parameter without modification.
+    """
     # Load configuration file according to environment name
     current_path = Path(__file__).parent.resolve()
     conf = yaml.safe_load(Path.joinpath(current_path,"config", "{}.yaml".format(env_name)).read_text())
@@ -82,7 +149,34 @@ def apply_env_variables_datasets(c, env_name="prod"):
 
 
 @task
-def apply_env_variables_queries(c, env_name="prod"):
+def apply_config_parameters_to_all_queries(c, env_name="prod"):
+    """
+    Applies parameters from a configuration file to .sqlx query template files,
+    generating new .sql files for each template.
+
+    Args:
+        c (object): An object providing context for task execution (e.g., task runner).
+        env_name (str, optional): Name of the environment to use for configuration. Defaults to "prod".
+
+    Raises:
+        FileNotFoundError: If the specified configuration file is not found.
+        ValueError: If the configuration file is invalid or missing required keys.
+        TemplateError: If an error occurs during template rendering.
+
+    Example usage:
+        apply_config_parameters_to_all_queries(my_task_context, env_name="dev")
+    
+    Customization:
+        1) Add a new parameter to .sqlx template file: Add the placeholder: 
+            a) Insert the new parameter's placeholder within the template file, surrounded 
+            by Jinja2's delimiters (e.g., {{ new_parameter }}) where you want its value to appear 
+            in the rendered output.
+            b) Add a new key-value pair for the new parameter under the appropriate section of 
+            your config.yaml.tftpl YAML configuration file. Ensure the key matches the placeholder 
+            name in the template.
+            c) No code changes required: The existing code already retrieves configuration values 
+            and renders them into templates, so it should handle the new parameter without modification.
+    """
     # Load configuration file according to environment name
     current_path = Path(__file__).parent.resolve()
     conf = yaml.safe_load(Path.joinpath(current_path,"config", "{}.yaml".format(env_name)).read_text())
@@ -106,7 +200,24 @@ def apply_env_variables_queries(c, env_name="prod"):
             print("New SQL file rendered at {}".format(rendered_sql_file))
 
 @task
-def apply_env_variables_tables(c, env_name="prod"):
+def apply_config_parameters_to_all_tables(c, env_name="prod"):
+    """
+    Applies parameters from a configuration file and table schemas to .sqlx table template files,
+    generating new .sql files for each template.
+
+    Args:
+        c (object): An object providing context for task execution (e.g., task runner).
+        env_name (str, optional): Name of the environment to use for configuration. Defaults to "prod".
+
+    Raises:
+        FileNotFoundError: If specified configuration or schema files are not found.
+        ValueError: If configuration or schema files are invalid or missing required keys.
+        TemplateError: If an error occurs during template rendering.
+        JSONDecodeError: If a schema file cannot be parsed as JSON.
+
+    Example usage:
+        apply_config_parameters_to_all_tables(my_task_context, env_name="dev")
+    """
     import json
     # Load configuration file according to environment name
     current_path = Path(__file__).parent.resolve()
@@ -159,7 +270,7 @@ def setup_poetry_test(c):  # noqa: ANN001, ANN201
 
 
 @task
-def setup_poetry_prod(c):  # noqa: ANN001, ANN201
+def setup_poetry_config(c):  # noqa: ANN001, ANN201
     """Create virtualenv, and install requirements, with output"""
     require_venv(c, test_requirements=False)
 
@@ -192,7 +303,7 @@ def _determine_local_import_names(start_dir: str) -> List[str]:
     ]
 
 
-@task(pre=[setup_poetry_prod])
+@task(pre=[setup_poetry_config])
 def fix(c):  # noqa: ANN001, ANN201
     """Apply linting fixes"""
     c.run("poetry run black *.py **/*.py --force-exclude .venv")

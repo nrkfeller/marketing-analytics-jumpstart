@@ -22,13 +22,14 @@ variable "region" {
   type        = string
 }
 
-variable "environment" {
+variable "property_id" {
   type = string
 }
 
 variable "daily_schedule" {
-  type    = string
-  default = "2 5 * * *"
+  type = string
+  # This schedule executes every days, each 2 hours between 5AM and 11PM.
+  default = "0 5-23/2 * * *" #"2 5 * * *"
 }
 
 variable "dataform_repository_id" {
@@ -41,6 +42,11 @@ variable "source_ga4_export_project_id" {
 
 variable "source_ga4_export_dataset" {
   type = string
+}
+
+variable "ga4_incremental_processing_days_back" {
+  type    = string
+  default = "3"
 }
 
 variable "source_ads_export_data" {
@@ -68,4 +74,8 @@ variable "gitCommitish" {
 variable "includedTags" {
   type    = list(string)
   default = []
+}
+
+variable "time_zone" {
+  type = string
 }

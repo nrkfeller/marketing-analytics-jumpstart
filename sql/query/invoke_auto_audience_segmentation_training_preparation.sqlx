@@ -1,0 +1,38 @@
+-- Copyright 2023 Google LLC
+--
+-- Licensed under the Apache License, Version 2.0 (the "License");
+-- you may not use this file except in compliance with the License.
+-- You may obtain a copy of the License at
+--
+--     http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing, software
+-- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
+
+-- This SQL script is designed to prepare data for training a machine learning model in 
+-- BigQuery, specifically for a scenario where you need to determine a lookback window 
+-- for feature engineering. It calculates a start date (DATE_START), an end date (DATE_END), 
+-- and a lookback period (LOOKBACK_DAYS) from an events table, and then passes these values 
+-- to a stored procedure.
+
+DECLARE DATE_START DATE DEFAULT NULL;
+DECLARE DATE_END DATE DEFAULT NULL;
+DECLARE LOOKBACK_DAYS INT64 DEFAULT NULL;
+
+SET DATE_END = (SELECT MAX(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`); 
+SET DATE_START = (SELECT DATE_ADD(MIN(event_date), INTERVAL 15 DAY) FROM `{{mds_project_id}}.{{mds_dataset}}.event`); 
+SET LOOKBACK_DAYS = {{lookback_days}};
+
+-- If DATE_START > maximum event_date OR DATE_END < minimum event_date, then set DATE_START for the max event_date and set DATE_END for the min event_date
+IF DATE_START >= (SELECT MAX(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`) OR DATE_END <= (SELECT MIN(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`) THEN
+  SET DATE_START = (SELECT MIN(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`);
+  SET DATE_END = (SELECT MAX(event_date) FROM `{{mds_project_id}}.{{mds_dataset}}.event`);
+END IF;
+
+-- This line calls a stored procedure, passing the calculated DATE_START, DATE_END, and LOOKBACK_DAYS as arguments. 
+-- This stored procedure handles the actual data preparation for the machine learning model, using the provided dates 
+-- and lookback period to construct features.
+CALL `{{project_id}}.{{dataset}}.{{stored_procedure}}`(DATE_START, DATE_END, LOOKBACK_DAYS);
