@@ -111,9 +111,8 @@ def prediction_pl(
     number_of_models_considered: int,
     bigquery_source: str,
     bigquery_destination_prefix: str,
-
-    pubsub_activation_topic: str,
-    pubsub_activation_type: str
+    pubsub_activation_topic: Optional[str] = None,
+    pubsub_activation_type: Optional[str] = None
 ):
 
     purchase_propensity_label = bq_select_best_kmeans_model(
@@ -140,10 +139,11 @@ def prediction_pl(
         source_table=predictions_op.outputs['destination_table']
     )
 
-    send_pubsub_activation_msg(
-        project=project_id,
-        topic_name=pubsub_activation_topic,
-        activation_type=pubsub_activation_type,
-        predictions_table=flatten_predictions.outputs['destination_table'],
-    )
+    if pubsub_activation_topic and pubsub_activation_type:
+        send_pubsub_activation_msg(
+            project=project_id,
+            topic_name=pubsub_activation_topic,
+            activation_type=pubsub_activation_type,
+            predictions_table=flatten_predictions.outputs['destination_table'],
+        )
 

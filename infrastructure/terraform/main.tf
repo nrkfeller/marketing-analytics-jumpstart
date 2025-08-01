@@ -66,6 +66,7 @@ resource "local_file" "feature_store_configuration" {
     mds_dataset            = "${var.mds_dataset_prefix}_${local.mds_dataset_suffix}"
     pipelines_github_owner = var.pipelines_github_owner
     pipelines_github_repo  = var.pipelines_github_repo
+    deploy_activation      = var.deploy_activation
     #    TODO: this needs to be specific to environment.
     location = var.destination_data_location
   })

@@ -33,11 +33,6 @@ def prediction_binary_classification_pl(
     model_metric_name: str,
     model_metric_threshold: float,
     number_of_models_considered: int,
-
-
-    pubsub_activation_topic: str,
-    pubsub_activation_type: str,
-
     bigquery_source: str,
     bigquery_destination_prefix: str,
     bq_unique_key: str,
@@ -46,11 +41,12 @@ def prediction_binary_classification_pl(
     max_replica_count: int = 10,
     batch_size: int = 64,
     accelerator_count: int = 0,
-    accelerator_type: str = None,
+    accelerator_type: str = "ACCELERATOR_TYPE_UNSPECIFIED",
     generate_explanation: bool = False,
-
     threashold: float = 0.5,
     positive_label: str = 'true',
+    pubsub_activation_topic: Optional[str] = None,
+    pubsub_activation_type: Optional[str] = None,
 
 
 
@@ -88,12 +84,13 @@ def prediction_binary_classification_pl(
         positive_label=positive_label
     )
 
-    send_pubsub_activation_msg(
-        project=project_id,
-        topic_name=pubsub_activation_topic,
-        activation_type=pubsub_activation_type,
-        predictions_table=flatten_predictions.outputs['destination_table'],
-    )
+    if pubsub_activation_topic and pubsub_activation_type:
+        send_pubsub_activation_msg(
+            project=project_id,
+            topic_name=pubsub_activation_topic,
+            activation_type=pubsub_activation_type,
+            predictions_table=flatten_predictions.outputs['destination_table'],
+        )
 
 
 
@@ -106,22 +103,18 @@ def prediction_regression_pl(
     model_metric_name: str,
     model_metric_threshold: float,
     number_of_models_considered: int,
-
-
-    pubsub_activation_topic: str,
-    pubsub_activation_type: str,
-
     bigquery_source: str,
     bigquery_destination_prefix: str,
     bq_unique_key: str,
-    
     job_name_prefix: str,
     machine_type: str = "n1-standard-4",
     max_replica_count: int = 10,
     batch_size: int = 64,
     accelerator_count: int = 0,
-    accelerator_type: str = None,
-    generate_explanation: bool = False
+    accelerator_type: str = "ACCELERATOR_TYPE_UNSPECIFIED",
+    generate_explanation: bool = False,
+    pubsub_activation_topic: Optional[str] = None,
+    pubsub_activation_type: Optional[str] = None
 ):
 
     purchase_propensity_label = elect_best_tabular_model(
@@ -154,9 +147,10 @@ def prediction_regression_pl(
         bq_unique_key = bq_unique_key
     )
 
-    send_pubsub_activation_msg(
-        project=project_id,
-        topic_name=pubsub_activation_topic,
-        activation_type=pubsub_activation_type,
-        predictions_table=flatten_predictions.outputs['destination_table'],
-    )
+    if pubsub_activation_topic and pubsub_activation_type:
+        send_pubsub_activation_msg(
+            project=project_id,
+            topic_name=pubsub_activation_topic,
+            activation_type=pubsub_activation_type,
+            predictions_table=flatten_predictions.outputs['destination_table'],
+        )
